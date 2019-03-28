@@ -27,6 +27,7 @@ import base64
 import os
 import hashlib
 import hmac
+import scrypt
 from typing import Union
 
 import pyaes
@@ -194,6 +195,12 @@ def sha256(x: Union[bytes, str]) -> bytes:
 def sha256d(x: Union[bytes, str]) -> bytes:
     x = to_bytes(x, 'utf8')
     out = bytes(sha256(sha256(x)))
+    return out
+
+
+def scryptHash(x: Union[bytes, str]) -> bytes:
+    x = to_bytes(x, 'utf8')
+    out = scrypt.hash(x, x, 1024, 1, 1, 32)
     return out
 
 

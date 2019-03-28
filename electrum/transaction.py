@@ -545,7 +545,11 @@ def deserialize(raw: str, force_full_parse=False) -> dict:
     full_parse = force_full_parse or is_partial
     vds = BCDataStream()
     vds.write(raw_bytes)
+    # read header
     d['version'] = vds.read_int32()
+    d['time'] = vds.read_uint32()
+    
+    # read inputs
     n_vin = vds.read_compact_size()
     is_segwit = (n_vin == 0)
     if is_segwit:
@@ -555,13 +559,22 @@ def deserialize(raw: str, force_full_parse=False) -> dict:
         n_vin = vds.read_compact_size()
     d['segwit_ser'] = is_segwit
     d['inputs'] = [parse_input(vds, full_parse=full_parse) for i in range(n_vin)]
+    
+    # read outputs
     n_vout = vds.read_compact_size()
     d['outputs'] = [parse_output(vds, i) for i in range(n_vout)]
     if is_segwit:
         for i in range(n_vin):
             txin = d['inputs'][i]
             parse_witness(vds, txin, full_parse=full_parse)
+            
+    # read locktime
     d['lockTime'] = vds.read_uint32()
+    
+    # read service reference hash of version 2 txs
+    if d['version'] > 1:
+        vds.read_bytes(32)
+
     if vds.can_read_more():
         raise SerializationError('extra junk at the end')
     return d
