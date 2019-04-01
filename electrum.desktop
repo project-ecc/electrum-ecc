@@ -2,13 +2,13 @@
 # sudo desktop-file-install electrum.desktop
 
 [Desktop Entry]
-Comment=Lightweight Bitcoin Client
-Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum %u"
-GenericName[en_US]=Bitcoin Wallet
-GenericName=Bitcoin Wallet
+Comment=Lightweight ECCoin Client
+Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum-ecc %u"
+GenericName[en_US]=ECCoin Wallet
+GenericName=ECCoin Wallet
 Icon=electrum
-Name[en_US]=Electrum Bitcoin Wallet
-Name=Electrum Bitcoin Wallet
+Name[en_US]=Electrum ECCoin Wallet
+Name=Electrum ECCoin Wallet
 Categories=Finance;Network;
 StartupNotify=true
 StartupWMClass=electrum
@@ -18,5 +18,5 @@ MimeType=x-scheme-handler/bitcoin;
 Actions=Testnet;
 
 [Desktop Action Testnet]
-Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum --testnet %u"
+Exec=sh -c "PATH=\"\\$HOME/.local/bin:\\$PATH\"; electrum-ecc --testnet %u"
 Name=Testnet mode
