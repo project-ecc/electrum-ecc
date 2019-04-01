@@ -69,6 +69,15 @@ if TYPE_CHECKING:
     from .network import Network
     from .simple_config import SimpleConfig
 
+TX_CONFIRMED_AFTER = 30
+
+TX_CONF_REMAP = [0,
+                 1,1,1,1,1,1, # Icon clock1
+                 2,2,2,2,2,2, # Icon clock2
+                 3,3,3,3,3,3, # Icon clock3
+                 4,4,4,4,4,4, # Icon clock4
+                 5,5,5,5,5,   # Icon clock5
+                 6]           # Icon confirmed
 
 TX_STATUS = [
     _('Unconfirmed'),
@@ -601,7 +610,7 @@ class Abstract_Wallet(AddressSynchronizer):
             else:
                 status = 2  # not SPV verified
         else:
-            status = 3 + min(conf, 6)
+            status = 3 + TX_CONF_REMAP[min(conf, TX_CONFIRMED_AFTER)]
         time_str = format_time(timestamp) if timestamp else _("unknown")
         status_str = TX_STATUS[status] if status < 4 else time_str
         if extra:
