@@ -30,6 +30,7 @@
 import struct
 import traceback
 import sys
+import time
 from typing import (Sequence, Union, NamedTuple, Tuple, Optional, Iterable,
                     Callable, List, Dict)
 
@@ -612,8 +613,8 @@ class Transaction:
         self._inputs = None
         self._outputs = None  # type: List[TxOutput]
         self.locktime = 0
-        self.version = 2
-        self.time = 0
+        self.version = 1
+        self.timestamp = int(time.time())
         # by default we assume this is a partial txn;
         # this value will get properly set when deserializing
         self.is_partial_originally = True
@@ -716,20 +717,21 @@ class Transaction:
         self._outputs = [TxOutput(x['type'], x['address'], x['value']) for x in d['outputs']]
         self.locktime = d['lockTime']
         self.version = d['version']
-        self.time = d['time']
+        self.timestamp = d['time']
         self.is_partial_originally = d['partial']
         self._segwit_ser = d['segwit_ser']
         return d
 
     @classmethod
-    def from_io(klass, inputs, outputs, locktime=0, version=None, time=0):
+    def from_io(klass, inputs, outputs, locktime=0, version=None, timestamp=None):
         self = klass(None)
         self._inputs = inputs
         self._outputs = outputs
         self.locktime = locktime
         if version is not None:
             self.version = version
-        self.time = time
+        if timestamp is not None:
+            self.timestamp = timestamp
         self.BIP69_sort()
         return self
 
@@ -978,7 +980,7 @@ class Transaction:
 
     def serialize_preimage(self, i):
         nVersion = int_to_hex(self.version, 4)
-        nTime = int_to_hex(self.time, 4)
+        nTimeStamp = int_to_hex(self.timestamp, 4)
         nHashType = int_to_hex(1, 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
@@ -994,11 +996,11 @@ class Transaction:
             scriptCode = var_int(len(preimage_script) // 2) + preimage_script
             amount = int_to_hex(txin['value'], 8)
             nSequence = int_to_hex(txin.get('sequence', 0xffffffff - 1), 4)
-            preimage = nVersion + nTime + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
+            preimage = nVersion + nTimeStamp + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
         else:
             txins = var_int(len(inputs)) + ''.join(self.serialize_input(txin, self.get_preimage_script(txin) if i==k else '') for k, txin in enumerate(inputs))
             txouts = var_int(len(outputs)) + ''.join(self.serialize_output(o) for o in outputs)
-            preimage = nVersion + nTime + txins + txouts + nLocktime + nHashType
+            preimage = nVersion + nTimeStamp + txins + txouts + nLocktime + nHashType
         return preimage
 
     def is_segwit(self, guess_for_address=False):
@@ -1019,7 +1021,7 @@ class Transaction:
     def serialize_to_network(self, estimate_size=False, witness=True):
         self.deserialize()
         nVersion = int_to_hex(self.version, 4)
-        nTime = int_to_hex(self.time, 4)
+        nTimeStamp = int_to_hex(self.timestamp, 4)
         nLocktime = int_to_hex(self.locktime, 4)
         inputs = self.inputs()
         outputs = self.outputs()
@@ -1033,9 +1035,9 @@ class Transaction:
             marker = '00'
             flag = '01'
             witness = ''.join(self.serialize_witness(x, estimate_size) for x in inputs)
-            return nVersion + nTime + marker + flag + txins + txouts + witness + nLocktime
+            return nVersion + nTimeStamp + marker + flag + txins + txouts + witness + nLocktime
         else:
-            return nVersion + nTime + txins + txouts + nLocktime
+            return nVersion + nTimeStamp + txins + txouts + nLocktime
 
     def txid(self):
         self.deserialize()
