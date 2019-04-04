@@ -17,13 +17,16 @@ folder.
 2. Build image
 
     ```
-    $ sudo docker build --no-cache -t electrum-appimage-builder-img contrib/build-linux/appimage
+    $ cd <path to electrum repo>
+    $ docker build --no-cache -t electrum-appimage-builder-img contrib/build-linux/appimage
     ```
 
 3. Build binary
 
     ```
-    $ sudo docker run -it \
+    $ cd <path to electrum repo>
+    $ git pull # pull latest changes
+    $ docker run -it \
         --name electrum-appimage-builder-cont \
         -v $PWD:/opt/electrum \
         --rm \

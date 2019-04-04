@@ -19,8 +19,11 @@ folder.
 
 2. Build image
 
+    This has to be done only once!
+
     ```
-    $ sudo docker build -t electrum-wine-builder-img contrib/build-wine/docker
+    $ cd <path to electrum repo>
+    $ docker build -t electrum-wine-builder-img contrib/build-wine/docker
     ```
 
     Note: see [this](https://stackoverflow.com/a/40516974/7499128) if having dns problems
@@ -41,8 +44,9 @@ folder.
 
     And then build from this directory:
     ```
-    $ git checkout $REV
-    $ sudo docker run -it \
+    $ cd <path to electrum repo>
+    $ git pull # get latest changes
+    $ docker run -it \
         --name electrum-wine-builder-cont \
         -v $PWD:/opt/wine64/drive_c/electrum \
         --rm \
