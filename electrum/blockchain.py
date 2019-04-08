@@ -26,11 +26,12 @@ from typing import Optional, Dict, Mapping, Sequence
 
 from . import util
 from .bitcoin import hash_encode, int_to_hex, rev_hex
-from .crypto import scryptHash
 from . import constants
 from .util import bfh, bh2u
 from .simple_config import SimpleConfig
 
+import scrypt
+scryptHash = lambda x: scrypt.hash(x, x, N=1024, r=1, p=1, buflen=32)
 
 HEADER_SIZE = 80  # bytes
 MAX_TARGET = 0x00000000FFFF0000000000000000000000000000000000000000000000000000
