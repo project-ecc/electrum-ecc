@@ -3,5 +3,10 @@
         "pruning": "-",
         "s": "50002",
         "version": "1.4"
+    },
+    "eccserver1.ddns.net": {
+        "pruning": "-",
+        "s": "50002",
+        "version": "1.4"
     }
 }
