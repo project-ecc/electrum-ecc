@@ -4,10 +4,10 @@
 title = Electrum-ECC
 
 # (str) Package name
-package.name = Electrum-ECC
+package.name = electrumecc
 
 # (str) Package domain (needed for android/ios packaging)
-package.domain = network.ecc
+package.domain = org.ecc
 
 # (str) Source code where the main.py live
 source.dir = .
@@ -31,7 +31,7 @@ version.filename = %(source.dir)s/electrum/version.py
 #version = 1.9.8
 
 # (list) Application requirements
-requirements = python3, android, openssl, plyer, kivy==b47f669f44dbda4f463bcb7d2cada639f7fed3bc, libffi, libsecp256k1
+requirements = python3, android, openssl, plyer, kivy==b47f669f44dbda4f463bcb7d2cada639f7fed3bc, libffi, libsecp256k1, scrypt
 
 # (str) Presplash of the application
 #presplash.filename = %(source.dir)s/gui/kivy/theming/splash.png
