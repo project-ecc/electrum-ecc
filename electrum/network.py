@@ -256,7 +256,7 @@ class Network(PrintError):
         self.recent_servers = self._read_recent_servers()  # note: needs self.recent_servers_lock
 
         self.banner = ''
-        self.donation_address = ''
+        self.donation_address = 'EWPweYorSXU98JiejmnQTZzyZXhTdKUZuz'
         self.relay_fee = None  # type: Optional[int]
         # callbacks set by the GUI
         self.callbacks = defaultdict(list)      # note: needs self.callback_lock

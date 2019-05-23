@@ -692,12 +692,12 @@ def parse_URI(uri: str, on_pr: Callable=None) -> dict:
 
     if ':' not in uri:
         if not bitcoin.is_address(uri):
-            raise Exception("Not a bitcoin address")
+            raise Exception("Not a eccoin address")
         return {'address': uri}
 
     u = urllib.parse.urlparse(uri)
-    if u.scheme != 'bitcoin':
-        raise Exception("Not a bitcoin URI")
+    if u.scheme != 'eccoin':
+        raise Exception("Not a eccoin URI")
     address = u.path
 
     # python for android fails to parse query
