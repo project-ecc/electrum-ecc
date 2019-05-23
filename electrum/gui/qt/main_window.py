@@ -160,7 +160,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, PrintError):
             decimal_point_to_base_unit_name(self.decimal_point)
         except UnknownBaseUnit:
             self.decimal_point = DECIMAL_POINT_DEFAULT
-        self.num_zeros = int(config.get('num_zeros', 0))
+        self.num_zeros = int(config.get('num_zeros', 6))
 
         self.completions = QStringListModel()
 
