@@ -35,14 +35,18 @@ from typing import (Sequence, Union, NamedTuple, Tuple, Optional, Iterable,
                     Callable, List, Dict)
 
 from . import ecc, bitcoin, constants, segwit_addr
-from .util import print_error, profiler, to_bytes, bh2u, bfh
+from .util import profiler, to_bytes, bh2u, bfh
 from .bitcoin import (TYPE_ADDRESS, TYPE_PUBKEY, TYPE_SCRIPT, hash_160,
                       hash160_to_p2sh, hash160_to_p2pkh, hash_to_segwit_addr,
                       hash_encode, var_int, TOTAL_COIN_SUPPLY_LIMIT_IN_BTC, COIN,
                       push_script, int_to_hex, push_script, b58_address_to_hash160,
-                      opcodes, add_number_to_script, base_decode)
+                      opcodes, add_number_to_script, base_decode, is_segwit_script_type)
 from .crypto import sha256d
 from .keystore import xpubkey_to_address, xpubkey_to_pubkey
+from .logging import get_logger
+
+
+_logger = get_logger(__name__)
 
 
 NO_SIGNATURE = 'ff'
@@ -270,8 +274,7 @@ def parse_scriptSig(d, _bytes):
         decoded = [ x for x in script_GetOp(_bytes) ]
     except Exception as e:
         # coinbase transactions raise an exception
-        print_error("parse_scriptSig: cannot find address in input script (coinbase?)",
-                    bh2u(_bytes))
+        _logger.info(f"parse_scriptSig: cannot find address in input script (coinbase?) {bh2u(_bytes)}")
         return
 
     match = [OPPushDataGeneric]
@@ -286,7 +289,7 @@ def parse_scriptSig(d, _bytes):
             elif len(item) == 34:
                 d['type'] = 'p2wsh-p2sh'
             else:
-                print_error("unrecognized txin type", bh2u(item))
+                _logger.info(f"unrecognized txin type {bh2u(item)}")
         elif opcodes.OP_1 <= item[0] <= opcodes.OP_16:
             # segwit embedded into p2sh
             # witness version 1-16
@@ -313,8 +316,7 @@ def parse_scriptSig(d, _bytes):
             signatures = parse_sig([sig])
             pubkey, address = xpubkey_to_address(x_pubkey)
         except:
-            print_error("parse_scriptSig: cannot find address in input script (p2pkh?)",
-                        bh2u(_bytes))
+            _logger.info(f"parse_scriptSig: cannot find address in input script (p2pkh?) {bh2u(_bytes)}")
             return
         d['type'] = 'p2pkh'
         d['signatures'] = signatures
@@ -332,8 +334,8 @@ def parse_scriptSig(d, _bytes):
         try:
             m, n, x_pubkeys, pubkeys, redeem_script = parse_redeemScript_multisig(redeem_script_unsanitized)
         except NotRecognizedRedeemScript:
-            print_error("parse_scriptSig: cannot find address in input script (p2sh?)",
-                        bh2u(_bytes))
+            _logger.info(f"parse_scriptSig: cannot find address in input script (p2sh?) {bh2u(_bytes)}")
+
             # we could still guess:
             # d['address'] = hash160_to_p2sh(hash_160(decoded[-1][1]))
             return
@@ -360,8 +362,7 @@ def parse_scriptSig(d, _bytes):
         d['signatures'] = [None]
         return
 
-    print_error("parse_scriptSig: cannot find address in input script (unknown)",
-                bh2u(_bytes))
+    _logger.info(f"parse_scriptSig: cannot find address in input script (unknown) {bh2u(_bytes)}")
 
 
 def parse_redeemScript_multisig(redeem_script: bytes):
@@ -446,8 +447,7 @@ def parse_input(vds, full_parse: bool):
         try:
             parse_scriptSig(d, scriptSig)
         except BaseException:
-            traceback.print_exc(file=sys.stderr)
-            print_error('failed to parse scriptSig', bh2u(scriptSig))
+            _logger.exception(f'failed to parse scriptSig {bh2u(scriptSig)}')
     return d
 
 
@@ -513,8 +513,7 @@ def parse_witness(vds, txin, full_parse: bool):
         txin['type'] = 'unknown'
     except BaseException:
         txin['type'] = 'unknown'
-        traceback.print_exc(file=sys.stderr)
-        print_error('failed to parse witness', txin.get('witness'))
+        _logger.exception(f"failed to parse witness {txin.get('witness')}")
 
 
 def parse_output(vds, i):
@@ -679,10 +678,10 @@ class Transaction:
                     try:
                         public_key.verify_message_hash(sig_string, pre_hash)
                     except Exception:
-                        traceback.print_exc(file=sys.stderr)
+                        _logger.exception('')
                         continue
                     j = pubkeys.index(pubkey_hex)
-                    print_error("adding sig", i, j, pubkey_hex, sig)
+                    _logger.info(f"adding sig {i} {j} {pubkey_hex} {sig}")
                     self.add_signature_to_txin(i, j, sig)
                     break
         # redo raw
@@ -833,11 +832,7 @@ class Transaction:
         if _type == 'address' and guess_for_address:
             _type = cls.guess_txintype_from_address(txin['address'])
         has_nonzero_witness = txin.get('witness', '00') not in ('00', None)
-        return cls.is_segwit_inputtype(_type) or has_nonzero_witness
-
-    @classmethod
-    def is_segwit_inputtype(cls, txin_type):
-        return txin_type in ('p2wpkh', 'p2wpkh-p2sh', 'p2wsh', 'p2wsh-p2sh')
+        return is_segwit_script_type(_type) or has_nonzero_witness
 
     @classmethod
     def guess_txintype_from_address(cls, addr):
@@ -1162,12 +1157,12 @@ class Transaction:
                     _pubkey = x_pubkey
                 else:
                     continue
-                print_error("adding signature for", _pubkey)
+                _logger.info(f"adding signature for {_pubkey}")
                 sec, compressed = keypairs.get(_pubkey)
                 sig = self.sign_txin(i, sec)
                 self.add_signature_to_txin(i, j, sig)
 
-        print_error("is_complete", self.is_complete())
+        _logger.info(f"is_complete {self.is_complete()}")
         self.raw = self.serialize()
 
     def sign_txin(self, txin_index, privkey_bytes) -> str:

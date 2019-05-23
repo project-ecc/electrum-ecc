@@ -41,8 +41,9 @@ from PyQt5.QtWidgets import (QMenu, QHeaderView, QLabel, QMessageBox,
 
 from electrum.address_synchronizer import TX_HEIGHT_LOCAL
 from electrum.i18n import _
-from electrum.util import (block_explorer_URL, profiler, print_error, TxMinedInfo,
-                           OrderedDictWithIndex, PrintError, timestamp_to_datetime)
+from electrum.util import (block_explorer_URL, profiler, TxMinedInfo,
+                           OrderedDictWithIndex, timestamp_to_datetime)
+from electrum.logging import get_logger, Logger
 
 from .util import (read_QIcon, MONOSPACE_FONT, Buttons, CancelButton, OkButton,
                    filename_field, MyTreeView, AcceptFileDragDrop, WindowModalDialog,
@@ -51,10 +52,14 @@ from .util import (read_QIcon, MONOSPACE_FONT, Buttons, CancelButton, OkButton,
 if TYPE_CHECKING:
     from electrum.wallet import Abstract_Wallet
 
+
+_logger = get_logger(__name__)
+
+
 try:
     from electrum.plot import plot_history, NothingToPlotException
 except:
-    print_error("qt/history_list: could not import electrum.plot. This feature needs matplotlib to be installed.")
+    _logger.info("could not import electrum.plot. This feature needs matplotlib to be installed.")
     plot_history = None
 
 # note: this list needs to be kept in sync with another in kivy
@@ -97,10 +102,11 @@ class HistorySortModel(QSortFilterProxyModel):
         except:
             return False
 
-class HistoryModel(QAbstractItemModel, PrintError):
+class HistoryModel(QAbstractItemModel, Logger):
 
     def __init__(self, parent):
-        super().__init__(parent)
+        QAbstractItemModel.__init__(self, parent)
+        Logger.__init__(self)
         self.parent = parent
         self.view = None  # type: HistoryList
         self.transactions = OrderedDictWithIndex()
@@ -224,7 +230,7 @@ class HistoryModel(QAbstractItemModel, PrintError):
 
     @profiler
     def refresh(self, reason: str):
-        self.print_error(f"refreshing... reason: {reason}")
+        self.logger.info(f"refreshing... reason: {reason}")
         assert self.parent.gui_thread == threading.current_thread(), 'must be called from GUI thread'
         assert self.view, 'view not set'
         selected = self.view.selectionModel().currentIndex()
@@ -249,9 +255,7 @@ class HistoryModel(QAbstractItemModel, PrintError):
         self.endInsertRows()
         if selected_row:
             self.view.selectionModel().select(self.createIndex(selected_row, 0), QItemSelectionModel.Rows | QItemSelectionModel.SelectCurrent)
-        f = self.view.current_filter
-        if f:
-            self.view.filter(f)
+        self.view.filter()
         # update summary
         self.summary = r['summary']
         if not self.view.years and self.transactions:
@@ -612,11 +616,10 @@ class HistoryList(MyTreeView, AcceptFileDragDrop):
         to_delete |= self.wallet.get_depending_transactions(delete_tx)
         question = _("Are you sure you want to remove this transaction?")
         if len(to_delete) > 1:
-            question = _(
-                "Are you sure you want to remove this transaction and {} child transactions?".format(len(to_delete) - 1)
-            )
-        answer = QMessageBox.question(self.parent, _("Please confirm"), question, QMessageBox.Yes, QMessageBox.No)
-        if answer == QMessageBox.No:
+            question = (_("Are you sure you want to remove this transaction and {} child transactions?")
+                        .format(len(to_delete) - 1))
+        if not self.parent.question(msg=question,
+                                    title=_("Please confirm")):
             return
         for tx in to_delete:
             self.wallet.remove_transaction(tx)

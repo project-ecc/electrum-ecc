@@ -45,16 +45,18 @@ import PyQt5.QtCore as QtCore
 from electrum.i18n import _, set_language
 from electrum.plugin import run_hook
 from electrum.base_wizard import GoBack
-from electrum.util import (UserCancelled, PrintError, profiler,
+from electrum.util import (UserCancelled, profiler,
                            WalletFileException, BitcoinException, get_new_wallet_name)
 from electrum.wallet import Wallet, Abstract_Wallet
+from electrum.logging import Logger
 
 from .installwizard import InstallWizard, WalletAlreadyOpenInMemory
 
 
-from .util import get_default_language, read_QIcon, ColorScheme
+from .util import get_default_language, read_QIcon, ColorScheme, custom_message_box
 from .main_window import ElectrumWindow
 from .network_dialog import NetworkDialog
+from .stylesheet_patcher import patch_qt_stylesheet
 
 
 class OpenFileEventFilter(QObject):
@@ -78,11 +80,12 @@ class QNetworkUpdatedSignalObject(QObject):
     network_updated_signal = pyqtSignal(str, object)
 
 
-class ElectrumGui(PrintError):
+class ElectrumGui(Logger):
 
     @profiler
     def __init__(self, config, daemon, plugins):
         set_language(config.get('language', get_default_language()))
+        Logger.__init__(self)
         # Uncomment this call to verify objects are being properly
         # GC-ed when windows are closed
         #network.add_jobs([DebugMem([Abstract_Wallet, SPV, Synchronizer,
@@ -129,7 +132,9 @@ class ElectrumGui(PrintError):
                 self.app.setStyleSheet(qdarkstyle.load_stylesheet_pyqt5())
             except BaseException as e:
                 use_dark_theme = False
-                self.print_error('Error setting dark theme: {}'.format(repr(e)))
+                self.logger.warning(f'Error setting dark theme: {repr(e)}')
+        # Apply any necessary stylesheet patches
+        patch_qt_stylesheet(use_dark_theme=use_dark_theme)
         # Even if we ourselves don't set the dark theme,
         # the OS/window manager/etc might set *a dark theme*.
         # Hence, try to choose colors accordingly:
@@ -198,6 +203,7 @@ class ElectrumGui(PrintError):
         self.build_tray_menu()
         # FIXME: Remove in favour of the load_wallet hook
         run_hook('on_new_window', w)
+        w.warn_if_testnet()
         w.warn_if_watching_only()
         return w
 
@@ -220,14 +226,23 @@ class ElectrumGui(PrintError):
         try:
             wallet = self.daemon.load_wallet(path, None)
         except BaseException as e:
-            traceback.print_exc(file=sys.stdout)
-            QMessageBox.warning(None, _('Error'),
-                                _('Cannot load wallet') + ' (1):\n' + str(e))
+            self.logger.exception('')
+            custom_message_box(icon=QMessageBox.Warning,
+                               parent=None,
+                               title=_('Error'),
+                               text=_('Cannot load wallet') + ' (1):\n' + str(e))
             # if app is starting, still let wizard to appear
             if not app_is_starting:
                 return
         if not wallet:
-            wallet = self._start_wizard_to_select_or_create_wallet(path)
+            try:
+                wallet = self._start_wizard_to_select_or_create_wallet(path)
+            except (WalletFileException, BitcoinException) as e:
+                self.logger.exception('')
+                custom_message_box(icon=QMessageBox.Warning,
+                                   parent=None,
+                                   title=_('Error'),
+                                   text=_('Cannot load wallet') + ' (2):\n' + str(e))
         if not wallet:
             return
         # create or raise window
@@ -238,9 +253,11 @@ class ElectrumGui(PrintError):
             else:
                 window = self._create_window_for_wallet(wallet)
         except BaseException as e:
-            traceback.print_exc(file=sys.stdout)
-            QMessageBox.warning(None, _('Error'),
-                                _('Cannot create window for wallet') + ':\n' + str(e))
+            self.logger.exception('')
+            custom_message_box(icon=QMessageBox.Warning,
+                               parent=None,
+                               title=_('Error'),
+                               text=_('Cannot create window for wallet') + ':\n' + str(e))
             if app_is_starting:
                 wallet_dir = os.path.dirname(path)
                 path = os.path.join(wallet_dir, get_new_wallet_name(wallet_dir))
@@ -269,11 +286,6 @@ class ElectrumGui(PrintError):
             return
         except WalletAlreadyOpenInMemory as e:
             return e.wallet
-        except (WalletFileException, BitcoinException) as e:
-            traceback.print_exc(file=sys.stderr)
-            QMessageBox.warning(None, _('Error'),
-                                _('Cannot load wallet') + ' (2):\n' + str(e))
-            return
         finally:
             wizard.terminate()
         # return if wallet creation is not complete
@@ -284,7 +296,7 @@ class ElectrumGui(PrintError):
         self.daemon.add_wallet(wallet)
         return wallet
 
-    def close_window(self, window):
+    def close_window(self, window: ElectrumWindow):
         if window in self.windows:
            self.windows.remove(window)
         self.build_tray_menu()
@@ -310,7 +322,7 @@ class ElectrumGui(PrintError):
         except GoBack:
             return
         except BaseException as e:
-            traceback.print_exc(file=sys.stdout)
+            self.logger.exception('')
             return
         self.timer.start()
         self.config.open_last_wallet()
@@ -345,5 +357,5 @@ class ElectrumGui(PrintError):
         # on some platforms the exec_ call may not return, so use clean_up()
 
     def stop(self):
-        self.print_error('closing GUI')
+        self.logger.info('closing GUI')
         self.app.quit()

@@ -38,14 +38,14 @@ import traceback
 from functools import partial
 from numbers import Number
 from decimal import Decimal
-from typing import TYPE_CHECKING, List, Optional, Tuple, Union
+from typing import TYPE_CHECKING, List, Optional, Tuple, Union, NamedTuple
 
 from .i18n import _
-from .util import (NotEnoughFunds, PrintError, UserCancelled, profiler,
+from .util import (NotEnoughFunds, UserCancelled, profiler,
                    format_satoshis, format_fee_satoshis, NoDynamicFeeEstimates,
                    WalletFileException, BitcoinException,
                    InvalidPassword, format_time, timestamp_to_datetime, Satoshis,
-                   Fiat, bfh, bh2u, TxMinedInfo, print_error)
+                   Fiat, bfh, bh2u, TxMinedInfo)
 from .bitcoin import (COIN, TYPE_ADDRESS, is_address, address_to_script,
                       is_minikey, relayfee, dust_threshold)
 from .crypto import sha256d
@@ -64,6 +64,7 @@ from .contacts import Contacts
 from .interface import RequestTimedOut
 from .ecc_fast import is_using_fast_ecc
 from .mnemonic import Mnemonic
+from .logging import get_logger
 
 if TYPE_CHECKING:
     from .network import Network
@@ -78,6 +79,8 @@ TX_CONF_REMAP = [0,
                  4,4,4,4,4,4, # Icon clock4
                  5,5,5,5,5,   # Icon clock5
                  6]           # Icon confirmed
+
+_logger = get_logger(__name__)
 
 TX_STATUS = [
     _('Unconfirmed'),
@@ -189,6 +192,17 @@ class InternalAddressCorruption(Exception):
                  "Please restore your wallet from seed, and compare the addresses in both files")
 
 
+class TxWalletDetails(NamedTuple):
+    txid: Optional[str]
+    status: str
+    label: str
+    can_broadcast: bool
+    can_bump: bool
+    amount: Optional[int]
+    fee: Optional[int]
+    tx_mined_status: TxMinedInfo
+    mempool_depth_bytes: Optional[int]
+
 
 class Abstract_Wallet(AddressSynchronizer):
     """
@@ -196,9 +210,9 @@ class Abstract_Wallet(AddressSynchronizer):
     Completion states (watching-only, single account, no seed, etc) are handled inside classes.
     """
 
+    LOGGING_SHORTCUT = 'w'
     max_change_outputs = 3
     gap_limit_for_change = 6
-    verbosity_filter = 'w'
 
     def __init__(self, storage: WalletStorage):
         if storage.requires_upgrade():
@@ -250,8 +264,11 @@ class Abstract_Wallet(AddressSynchronizer):
     def test_addresses_sanity(self):
         addrs = self.get_receiving_addresses()
         if len(addrs) > 0:
-            if not bitcoin.is_address(addrs[0]):
-                raise WalletFileException('The addresses in this wallet are not bitcoin addresses.')
+            addr = str(addrs[0])
+            if not bitcoin.is_address(addr):
+                neutered_addr = addr[:5] + '..' + addr[-2:]
+                raise WalletFileException(f'The addresses in this wallet are not bitcoin addresses.\n'
+                                          f'e.g. {neutered_addr} (length: {len(addr)})')
 
     def calc_unused_change_addresses(self):
         with self.lock:
@@ -353,25 +370,23 @@ class Abstract_Wallet(AddressSynchronizer):
         return True
         #return self.history.values() != [[]] * len(self.history)
 
-    def get_tx_info(self, tx):
+    def get_tx_info(self, tx) -> TxWalletDetails:
         is_relevant, is_mine, v, fee = self.get_wallet_delta(tx)
         exp_n = None
         can_broadcast = False
         can_bump = False
         label = ''
-        height = conf = timestamp = None
         tx_hash = tx.txid()
+        tx_mined_status = self.get_tx_height(tx_hash)
         if tx.is_complete():
             if self.db.get_transaction(tx_hash):
                 label = self.get_label(tx_hash)
-                tx_mined_status = self.get_tx_height(tx_hash)
-                height, conf = tx_mined_status.height, tx_mined_status.conf
-                if height > 0:
-                    if conf:
-                        status = _("{} confirmations").format(conf)
+                if tx_mined_status.height > 0:
+                    if tx_mined_status.conf:
+                        status = _("{} confirmations").format(tx_mined_status.conf)
                     else:
                         status = _('Not verified')
-                elif height in (TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_UNCONFIRMED):
+                elif tx_mined_status.height in (TX_HEIGHT_UNCONF_PARENT, TX_HEIGHT_UNCONFIRMED):
                     status = _('Unconfirmed')
                     if fee is None:
                         fee = self.db.get_tx_fee(tx_hash)
@@ -401,7 +416,17 @@ class Abstract_Wallet(AddressSynchronizer):
         else:
             amount = None
 
-        return tx_hash, status, label, can_broadcast, can_bump, amount, fee, height, conf, timestamp, exp_n
+        return TxWalletDetails(
+            txid=tx_hash,
+            status=status,
+            label=label,
+            can_broadcast=can_broadcast,
+            can_bump=can_bump,
+            amount=amount,
+            fee=fee,
+            tx_mined_status=tx_mined_status,
+            mempool_depth_bytes=exp_n,
+        )
 
     def get_spendable_coins(self, domain, config, *, nonlocal_only=False):
         confirmed_only = config.get('confirmed_only', False)
@@ -425,10 +450,12 @@ class Abstract_Wallet(AddressSynchronizer):
         return c1-c2, u1-u2, x1-x2
 
     def balance_at_timestamp(self, domain, target_timestamp):
+        # we assume that get_history returns items ordered by block height
+        # we also assume that block timestamps are monotonic (which is false...!)
         h = self.get_history(domain)
         balance = 0
         for tx_hash, tx_mined_status, value, balance in h:
-            if tx_mined_status.timestamp > target_timestamp:
+            if tx_mined_status.timestamp is None or tx_mined_status.timestamp > target_timestamp:
                 return balance - value
         # return last balance
         return balance
@@ -815,9 +842,9 @@ class Abstract_Wallet(AddressSynchronizer):
         # wait until we are connected, because the user
         # might have selected another server
         if self.network:
-            self.print_error("waiting for network...")
+            self.logger.info("waiting for network...")
             wait_for_network()
-            self.print_error("waiting while wallet is syncing...")
+            self.logger.info("waiting while wallet is syncing...")
             wait_for_wallet()
         else:
             self.synchronize()
@@ -930,7 +957,7 @@ class Abstract_Wallet(AddressSynchronizer):
                 raw_tx = self.network.run_from_another_thread(
                     self.network.get_transaction(tx_hash, timeout=10))
             except RequestTimedOut as e:
-                self.print_error(f'getting input txn from network timed out for {tx_hash}')
+                self.logger.info(f'getting input txn from network timed out for {tx_hash}')
                 if not ignore_timeout:
                     raise e
             else:
@@ -1056,7 +1083,7 @@ class Abstract_Wallet(AddressSynchronizer):
                     try:
                         baseurl = baseurl.replace(*rewrite)
                     except BaseException as e:
-                        self.print_stderr('Invalid config setting for "url_rewrite". err:', e)
+                        self.logger.info(f'Invalid config setting for "url_rewrite". err: {e}')
                 out['request_url'] = os.path.join(baseurl, 'req', key[0], key[1], key, key)
                 out['URI'] += '&r=' + out['request_url']
                 out['index_url'] = os.path.join(baseurl, 'index.html') + '?id=' + key
@@ -1240,7 +1267,7 @@ class Abstract_Wallet(AddressSynchronizer):
         index = self.get_address_index(address)
         return self.keystore.sign_message(index, message, password)
 
-    def decrypt_message(self, pubkey, message, password):
+    def decrypt_message(self, pubkey, message, password) -> bytes:
         addr = self.pubkeys_to_address(pubkey)
         index = self.get_address_index(addr)
         return self.keystore.decrypt_message(index, message, password)
@@ -1436,7 +1463,7 @@ class Imported_Wallet(Simple_Wallet):
                     for tx_hash, height in details:
                         transactions_new.add(tx_hash)
             transactions_to_remove -= transactions_new
-            self.db.remove_history(address)
+            self.db.remove_addr_history(address)
             for tx_hash in transactions_to_remove:
                 self.remove_transaction(tx_hash)
                 self.db.remove_tx_fee(tx_hash)
@@ -1481,8 +1508,8 @@ class Imported_Wallet(Simple_Wallet):
         for key in keys:
             try:
                 txin_type, pubkey = self.keystore.import_privkey(key, password)
-            except Exception:
-                bad_keys.append((key, _('invalid private key')))
+            except Exception as e:
+                bad_keys.append((key, _('invalid private key') + f': {e}'))
                 continue
             if txin_type not in ('p2pkh', 'p2wpkh', 'p2wpkh-p2sh'):
                 bad_keys.append((key, _('not implemented type') + f': {txin_type}'))
@@ -1559,7 +1586,7 @@ class Deterministic_Wallet(Abstract_Wallet):
     @profiler
     def try_detecting_internal_addresses_corruption(self):
         if not is_using_fast_ecc():
-            self.print_error("internal address corruption test skipped due to missing libsecp256k1")
+            self.logger.info("internal address corruption test skipped due to missing libsecp256k1")
             return
         addresses_all = self.get_addresses()
         # sample 1: first few
@@ -1877,7 +1904,8 @@ def create_new_wallet(*, path, passphrase=None, password=None, encrypt_file=True
     return {'seed': seed, 'wallet': wallet, 'msg': msg}
 
 
-def restore_wallet_from_text(text, *, path, network, passphrase=None, password=None, encrypt_file=True):
+def restore_wallet_from_text(text, *, path, network=None,
+                             passphrase=None, password=None, encrypt_file=True):
     """Restore a wallet from text. Text can be a seed phrase, a master
     public key, a master private key, a list of bitcoin addresses
     or bitcoin private keys."""
@@ -1919,7 +1947,7 @@ def restore_wallet_from_text(text, *, path, network, passphrase=None, password=N
 
     if network:
         wallet.start_network(network)
-        print_error("Recovering wallet...")
+        _logger.info("Recovering wallet...")
         wallet.wait_until_synchronized()
         wallet.stop_threads()
         # note: we don't wait for SPV

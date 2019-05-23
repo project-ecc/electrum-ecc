@@ -629,8 +629,7 @@ class WizardKnownOTPDialog(WizardOTPDialogBase):
 
     def abort_wallet_creation(self):
         self._on_release = True
-        os.unlink(self.path)
-        self.wizard.terminate()
+        self.wizard.terminate(aborted=True)
         self.dismiss()
 
 
@@ -899,7 +898,12 @@ class AddXpubDialog(WizardDialog):
 
     def __init__(self, wizard, **kwargs):
         WizardDialog.__init__(self, wizard, **kwargs)
-        self.is_valid = kwargs['is_valid']
+        def is_valid(x):
+            try:
+                return kwargs['is_valid'](x)
+            except:
+                return False
+        self.is_valid = is_valid
         self.title = kwargs['title']
         self.message = kwargs['message']
         self.allow_multi = kwargs.get('allow_multi', False)
@@ -971,8 +975,8 @@ class InstallWizard(BaseWizard, Widget):
         t = threading.Thread(target = target)
         t.start()
 
-    def terminate(self, *, storage=None):
-        if storage is None:
+    def terminate(self, *, storage=None, aborted=False):
+        if storage is None and not aborted:
             storage = self.create_storage(self.path)
         self.dispatch('on_wizard_complete', storage)
 
