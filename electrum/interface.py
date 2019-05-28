@@ -39,6 +39,7 @@ import aiorpcx
 from aiorpcx import RPCSession, Notification, NetAddress
 from aiorpcx.curio import timeout_after, TaskTimeout
 from aiorpcx.jsonrpc import JSONRPC
+from aiorpcx.rawsocket import RSClient
 import certifi
 
 from .util import ignore_exceptions, log_exceptions, bfh, SilentTaskGroup
@@ -107,6 +108,8 @@ class NotificationSession(RPCSession):
         msg_id = next(self._msg_counter)
         self.maybe_log(f"<-- {args} {kwargs} (id: {msg_id})")
         try:
+            # note: RPCSession.send_request raises TaskTimeout in case of a timeout.
+            # TaskTimeout is a subclass of CancelledError, which is *suppressed* in TaskGroups
             response = await asyncio.wait_for(
                 super().send_request(*args, **kwargs),
                 timeout)
@@ -170,12 +173,13 @@ class ErrorGettingSSLCertFromServer(Exception): pass
 class ConnectError(Exception): pass
 
 
-class _Connector(aiorpcx.Connector):
+class _RSClient(RSClient):
     async def create_connection(self):
         try:
             return await super().create_connection()
         except OSError as e:
-            raise ConnectError(e)
+            # note: using "from e" here will set __cause__ of ConnectError
+            raise ConnectError(e) from e
 
 
 def deserialize_server(server_str: str) -> Tuple[str, str, str]:
@@ -252,11 +256,11 @@ class Interface(Logger):
         """
         try:
             await self.open_session(ca_ssl_context, exit_early=True)
-        except ssl.SSLError as e:
-            if e.reason == 'CERTIFICATE_VERIFY_FAILED':
+        except ConnectError as e:
+            cause = e.__cause__
+            if isinstance(cause, ssl.SSLError) and cause.reason == 'CERTIFICATE_VERIFY_FAILED':
                 # failures due to self-signed certs are normal
                 return False
-            # e.g. too weak crypto
             raise
         return True
 
@@ -389,10 +393,10 @@ class Interface(Logger):
     async def get_certificate(self):
         sslc = ssl.SSLContext()
         try:
-            async with _Connector(RPCSession,
-                                  host=self.host, port=self.port,
-                                  ssl=sslc, proxy=self.proxy) as session:
-                return session.transport._ssl_protocol._sslpipe._sslobj.getpeercert(True)
+            async with _RSClient(session_factory=RPCSession,
+                                 host=self.host, port=self.port,
+                                 ssl=sslc, proxy=self.proxy) as session:
+                return session.transport._asyncio_transport._ssl_protocol._sslpipe._sslobj.getpeercert(True)
         except ValueError:
             return None
 
@@ -427,9 +431,9 @@ class Interface(Logger):
         return self.network.default_server == self.server
 
     async def open_session(self, sslc, exit_early=False):
-        async with _Connector(NotificationSession,
-                              host=self.host, port=self.port,
-                              ssl=sslc, proxy=self.proxy) as session:
+        async with _RSClient(session_factory=NotificationSession,
+                             host=self.host, port=self.port,
+                             ssl=sslc, proxy=self.proxy) as session:
             self.session = session  # type: NotificationSession
             self.session.interface = self
             self.session.set_default_timeout(self.network.get_network_timeout_seconds(NetworkTimeout.Generic))

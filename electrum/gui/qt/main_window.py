@@ -60,7 +60,8 @@ from electrum.util import (format_time, format_satoshis, format_fee_satoshis,
                            base_units, base_units_list, base_unit_name_to_decimal_point,
                            decimal_point_to_base_unit_name, quantize_feerate,
                            UnknownBaseUnit, DECIMAL_POINT_DEFAULT, UserFacingException,
-                           get_new_wallet_name, send_exception_to_crash_reporter)
+                           get_new_wallet_name, send_exception_to_crash_reporter,
+                           InvalidBitcoinURI)
 from electrum.transaction import Transaction, TxOutput
 from electrum.address_synchronizer import AddTransactionException
 from electrum.wallet import (Multisig_Wallet, CannotBumpFee, Abstract_Wallet,
@@ -906,6 +907,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         msg = _('ECCoin address where the payment should be received. Note that each payment request uses a different ECCoin address.')
         self.receive_address_label = HelpLabel(_('Receiving address'), msg)
         self.receive_address_e.textChanged.connect(self.update_receive_qr)
+        self.receive_address_e.textChanged.connect(self.update_receive_address_styling)
         self.receive_address_e.setFocusPolicy(Qt.ClickFocus)
         grid.addWidget(self.receive_address_label, 0, 0)
         grid.addWidget(self.receive_address_e, 0, 1, 1, -1)
@@ -1150,6 +1152,16 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         self.receive_qr.setData(uri)
         if self.qr_window and self.qr_window.isVisible():
             self.qr_window.qrw.setData(uri)
+
+    def update_receive_address_styling(self):
+        addr = str(self.receive_address_e.text())
+        if self.wallet.is_used(addr):
+            self.receive_address_e.setStyleSheet(ColorScheme.RED.as_stylesheet(True))
+            self.receive_address_e.setToolTip(_("This address has already been used. "
+                                                "For better privacy, do not reuse it for new payments."))
+        else:
+            self.receive_address_e.setStyleSheet("")
+            self.receive_address_e.setToolTip("")
 
     def set_feerounding_text(self, num_satoshis_added):
         self.feerounding_text = (_('Additional {} satoshis are going to be added.')
@@ -1844,8 +1856,8 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             return
         try:
             out = util.parse_URI(URI, self.on_pr)
-        except BaseException as e:
-            self.show_error(_('Invalid ECCoin URI:') + '\n' + str(e))
+        except InvalidBitcoinURI as e:
+            self.show_error(_("Error parsing URI") + f":\n{e}")
             return
         self.show_send_tab()
         r = out.get('r')
