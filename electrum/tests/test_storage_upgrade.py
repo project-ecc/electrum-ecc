@@ -278,8 +278,8 @@ class TestStorageUpgrade(WalletTestCase):
         from electrum.plugin import Plugins
         from electrum.simple_config import SimpleConfig
 
-        cls.electrum_path = tempfile.mkdtemp()
-        config = SimpleConfig({'electrum_path': cls.electrum_path})
+        cls.__electrum_path = tempfile.mkdtemp()
+        config = SimpleConfig({'electrum_path': cls.__electrum_path})
 
         gui_name = 'cmdline'
         # TODO it's probably wasteful to load all plugins... only need Trezor
@@ -288,7 +288,7 @@ class TestStorageUpgrade(WalletTestCase):
     @classmethod
     def tearDownClass(cls):
         super().tearDownClass()
-        shutil.rmtree(cls.electrum_path)
+        shutil.rmtree(cls.__electrum_path)
 
     def _upgrade_storage(self, wallet_json, accounts=1):
         if accounts == 1:
@@ -305,7 +305,13 @@ class TestStorageUpgrade(WalletTestCase):
             storage2 = self._load_storage_from_json_string(wallet_json=wallet_json,
                                                            path=path2,
                                                            manual_upgrades=False)
+            storage2.write()
             self._sanity_check_upgraded_storage(storage2)
+            # test opening upgraded storages again
+            s1 = WalletStorage(path2, manual_upgrades=False)
+            self._sanity_check_upgraded_storage(s1)
+            s2 = WalletStorage(path2, manual_upgrades=True)
+            self._sanity_check_upgraded_storage(s2)
         else:
             storage = self._load_storage_from_json_string(wallet_json=wallet_json,
                                                           path=self.wallet_path,
@@ -320,7 +326,7 @@ class TestStorageUpgrade(WalletTestCase):
     def _sanity_check_upgraded_storage(self, storage):
         self.assertFalse(storage.requires_split())
         self.assertFalse(storage.requires_upgrade())
-        w = Wallet(storage)
+        w = Wallet(storage, config=self.config)
 
     @staticmethod
     def _load_storage_from_json_string(*, wallet_json, path, manual_upgrades):
