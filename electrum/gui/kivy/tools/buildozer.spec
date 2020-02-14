@@ -47,7 +47,7 @@ requirements =
     kivy==39c17457bae91baf8fe710dc989791e45879f136,
     libffi,
     libsecp256k1,
-    scrypt
+    scrypt,
     pycryptodomex==bfc1cca093a7344c9ed2b7c34bc560db6dca662a
 
 # (str) Presplash of the application
@@ -187,7 +187,7 @@ p4a.source_dir = /opt/python-for-android
 [buildozer]
 
 # (int) Log level (0 = error only, 1 = info, 2 = debug (with command output))
-log_level = 1
+log_level = 2
 
 
 # -----------------------------------------------------------------------------
