@@ -511,7 +511,7 @@ class Transaction:
         self.locktime = 0
         self.version = 1
         self.timestamp = int(time.time())
-        self.serviceHash = None
+        self.serviceHash = ""
 
         self._cached_txid = None  # type: Optional[str]
 
@@ -1590,7 +1590,7 @@ class PartialTransaction(Transaction):
 
     @classmethod
     def from_io(cls, inputs: Sequence[PartialTxInput], outputs: Sequence[PartialTxOutput], *,
-                locktime: int = None, version: int = None):
+                locktime: int = None, version: int = None, timestamp: int = None):
         self = cls(None)
         self._inputs = list(inputs)
         self._outputs = list(outputs)
