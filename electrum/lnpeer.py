@@ -20,10 +20,11 @@ import aiorpcx
 
 from .crypto import sha256, sha256d
 from . import bitcoin
+from .bip32 import BIP32Node
 from . import ecc
 from .ecc import sig_string_from_r_and_s, get_r_and_s_from_sig_string, der_sig_from_sig_string
 from . import constants
-from .util import bh2u, bfh, log_exceptions, list_enabled_bits, ignore_exceptions, chunks, SilentTaskGroup
+from .util import bh2u, bfh, log_exceptions, ignore_exceptions, chunks, SilentTaskGroup
 from .transaction import Transaction, TxOutput, PartialTxOutput
 from .logging import Logger
 from .lnonion import (new_onion_packet, decode_onion_error, OnionFailureCode, calc_hops_data_for_payment,
@@ -36,7 +37,7 @@ from .lnutil import (Outpoint, LocalConfig, RECEIVED, UpdateAddHtlc,
                      funding_output_script, get_per_commitment_secret_from_seed,
                      secret_to_pubkey, PaymentFailure, LnLocalFeatures,
                      LOCAL, REMOTE, HTLCOwner, generate_keypair, LnKeyFamily,
-                     get_ln_flag_pair_of_bit, privkey_to_pubkey, UnknownPaymentHash, MIN_FINAL_CLTV_EXPIRY_ACCEPTED,
+                     ln_compare_features, privkey_to_pubkey, UnknownPaymentHash, MIN_FINAL_CLTV_EXPIRY_ACCEPTED,
                      LightningPeerConnectionClosed, HandshakeFailed, NotFoundChanAnnouncementForUpdate,
                      MINIMUM_MAX_HTLC_VALUE_IN_FLIGHT_ACCEPTED, MAXIMUM_HTLC_MINIMUM_MSAT_ACCEPTED,
                      MAXIMUM_REMOTE_TO_SELF_DELAY_ACCEPTED, RemoteMisbehaving, DEFAULT_TO_SELF_DELAY,
@@ -119,7 +120,7 @@ class Peer(Logger):
     async def initialize(self):
         if isinstance(self.transport, LNTransport):
             await self.transport.handshake()
-        self.send_message("init", gflen=0, lflen=1, localfeatures=self.localfeatures)
+        self.send_message("init", gflen=0, lflen=2, localfeatures=self.localfeatures)
         self._sent_init = True
 
     @property
@@ -127,7 +128,7 @@ class Peer(Logger):
         return self.lnworker.channels_for_peer(self.pubkey)
 
     def diagnostic_name(self):
-        return self.transport.name()
+        return self.lnworker.__class__.__name__ + ', ' + self.transport.name()
 
     def ping_if_required(self):
         if time.time() - self.ping_time > 120:
@@ -187,21 +188,10 @@ class Peer(Logger):
         # if they required some even flag we don't have, they will close themselves
         # but if we require an even flag they don't have, we close
         their_localfeatures = int.from_bytes(payload['localfeatures'], byteorder="big")
-        our_flags = set(list_enabled_bits(self.localfeatures))
-        their_flags = set(list_enabled_bits(their_localfeatures))
-        for flag in our_flags:
-            if flag not in their_flags and get_ln_flag_pair_of_bit(flag) not in their_flags:
-                # they don't have this feature we wanted :(
-                if flag % 2 == 0:  # even flags are compulsory
-                    raise GracefulDisconnect("remote does not have even flag {}"
-                                             .format(str(LnLocalFeatures(1 << flag))))
-                self.localfeatures ^= 1 << flag  # disable flag
-            else:
-                # They too have this flag.
-                # For easier feature-bit-testing, if this is an even flag, we also
-                # set the corresponding odd flag now.
-                if flag % 2 == 0 and self.localfeatures & (1 << flag):
-                    self.localfeatures |= 1 << get_ln_flag_pair_of_bit(flag)
+        try:
+            self.localfeatures = ln_compare_features(self.localfeatures, their_localfeatures)
+        except ValueError as e:
+            raise GracefulDisconnect(f"remote does not support {str(e)}")
         if isinstance(self.transport, LNTransport):
             self.channel_db.add_recent_peer(self.transport.peer_addr)
         self._received_init = True
@@ -461,16 +451,31 @@ class Peer(Logger):
             pass
         self.lnworker.peer_closed(self)
 
+    def is_static_remotekey(self):
+        return bool(self.localfeatures & LnLocalFeatures.OPTION_STATIC_REMOTEKEY_OPT)
+
     def make_local_config(self, funding_sat: int, push_msat: int, initiator: HTLCOwner) -> LocalConfig:
         # key derivation
-        channel_counter = self.lnworker.get_and_inc_counter_for_channel_keys()
-        keypair_generator = lambda family: generate_keypair(self.lnworker.ln_keystore, family, channel_counter)
+        seed = os.urandom(32)
+        node = BIP32Node.from_rootseed(seed, xtype='standard')
+        keypair_generator = lambda family: generate_keypair(node, family)
+
         if initiator == LOCAL:
             initial_msat = funding_sat * 1000 - push_msat
         else:
             initial_msat = push_msat
+
+        if self.is_static_remotekey():
+            wallet = self.lnworker.wallet
+            assert wallet.txin_type == 'p2wpkh'
+            addr = wallet.get_unused_address()
+            static_key = wallet.get_public_key(addr) # just a pubkey
+            payment_basepoint = OnlyPubkeyKeypair(bfh(static_key))
+        else:
+            payment_basepoint = keypair_generator(LnKeyFamily.PAYMENT_BASE)
+
         local_config=LocalConfig(
-            payment_basepoint=keypair_generator(LnKeyFamily.PAYMENT_BASE),
+            payment_basepoint=payment_basepoint,
             multisig_key=keypair_generator(LnKeyFamily.MULTISIG),
             htlc_basepoint=keypair_generator(LnKeyFamily.HTLC_BASE),
             delayed_basepoint=keypair_generator(LnKeyFamily.DELAY_BASE),
@@ -615,6 +620,7 @@ class Peer(Logger):
             'data_loss_protect_remote_pcp': {},
             "log": {},
             "revocation_store": {},
+            "static_remotekey_enabled": self.is_static_remotekey(), # stored because it cannot be "downgraded", per BOLT2
         }
         channel_id = chan_dict.get('channel_id')
         channels = self.lnworker.db.get_dict('channels')
@@ -729,12 +735,16 @@ class Peer(Logger):
         next_remote_ctn = chan.get_next_ctn(REMOTE)
         assert self.localfeatures & LnLocalFeatures.OPTION_DATA_LOSS_PROTECT_OPT
         # send message
+        srk_enabled = chan.is_static_remotekey_enabled()
+        if srk_enabled:
+            latest_secret, latest_point = chan.get_secret_and_point(LOCAL, 0)
+        else:
+            latest_secret, latest_point = chan.get_secret_and_point(LOCAL, latest_local_ctn)
         if oldest_unrevoked_remote_ctn == 0:
             last_rev_secret = 0
         else:
             last_rev_index = oldest_unrevoked_remote_ctn - 1
             last_rev_secret = chan.revocation_store.retrieve_secret(RevocationStore.START_INDEX - last_rev_index)
-        latest_secret, latest_point = chan.get_secret_and_point(LOCAL, latest_local_ctn)
         self.send_message(
             "channel_reestablish",
             channel_id=chan_id,
@@ -824,6 +834,8 @@ class Peer(Logger):
             if our_pcs != their_claim_of_our_last_per_commitment_secret:
                 self.logger.error(f"channel_reestablish: (DLP) local PCS mismatch: {bh2u(our_pcs)} != {bh2u(their_claim_of_our_last_per_commitment_secret)}")
                 return False
+            if chan.is_static_remotekey_enabled():
+                return True
             try:
                 __, our_remote_pcp = chan.get_secret_and_point(REMOTE, their_next_local_ctn - 1)
             except RemoteCtnTooFarInFuture:
@@ -846,6 +858,10 @@ class Peer(Logger):
             return
         elif we_are_ahead:
             self.logger.warning(f"channel_reestablish: we are ahead of remote! trying to force-close.")
+            await self.lnworker.force_close_channel(chan_id)
+            return
+        elif self.lnworker.wallet.is_lightning_backup():
+            self.logger.warning(f"channel_reestablish: force-closing because we are a recent backup")
             await self.lnworker.force_close_channel(chan_id)
             return
 
@@ -949,112 +965,25 @@ class Peer(Logger):
         assert chan.config[LOCAL].funding_locked_received
         chan.set_state(channel_states.OPEN)
         self.network.trigger_callback('channel', chan)
-        self.add_own_channel(chan)
+        # peer may have sent us a channel update for the incoming direction previously
+        pending_channel_update = self.orphan_channel_updates.get(chan.short_channel_id)
+        if pending_channel_update:
+            chan.set_remote_update(pending_channel_update['raw'])
         self.logger.info(f"CHANNEL OPENING COMPLETED for {scid}")
         forwarding_enabled = self.network.config.get('lightning_forward_payments', False)
         if forwarding_enabled:
             # send channel_update of outgoing edge to peer,
             # so that channel can be used to to receive payments
             self.logger.info(f"sending channel update for outgoing edge of {scid}")
-            chan_upd = self.get_outgoing_gossip_channel_update_for_chan(chan)
+            chan_upd = chan.get_outgoing_gossip_channel_update()
             self.transport.send_bytes(chan_upd)
 
-    def add_own_channel(self, chan):
-        # add channel to database
-        bitcoin_keys = [chan.config[LOCAL].multisig_key.pubkey, chan.config[REMOTE].multisig_key.pubkey]
-        sorted_node_ids = list(sorted(self.node_ids))
-        if sorted_node_ids != self.node_ids:
-            bitcoin_keys.reverse()
-        # note: we inject a channel announcement, and a channel update (for outgoing direction)
-        # This is atm needed for
-        # - finding routes
-        # - the ChanAnn is needed so that we can anchor to it a future ChanUpd
-        #   that the remote sends, even if the channel was not announced
-        #   (from BOLT-07: "MAY create a channel_update to communicate the channel
-        #    parameters to the final node, even though the channel has not yet been announced")
-        self.channel_db.add_channel_announcement(
-            {
-                "short_channel_id": chan.short_channel_id,
-                "node_id_1": sorted_node_ids[0],
-                "node_id_2": sorted_node_ids[1],
-                'chain_hash': constants.net.rev_genesis_bytes(),
-                'len': b'\x00\x00',
-                'features': b'',
-                'bitcoin_key_1': bitcoin_keys[0],
-                'bitcoin_key_2': bitcoin_keys[1]
-            },
-            trusted=True)
-        # only inject outgoing direction:
-        chan_upd_bytes = self.get_outgoing_gossip_channel_update_for_chan(chan)
-        chan_upd_payload = decode_msg(chan_upd_bytes)[1]
-        self.channel_db.add_channel_update(chan_upd_payload)
-        # peer may have sent us a channel update for the incoming direction previously
-        pending_channel_update = self.orphan_channel_updates.get(chan.short_channel_id)
-        if pending_channel_update:
-            chan.set_remote_update(pending_channel_update['raw'])
-        # add remote update with a fresh timestamp
-        if chan.get_remote_update():
-            now = int(time.time())
-            remote_update_decoded = decode_msg(chan.get_remote_update())[1]
-            remote_update_decoded['timestamp'] = now.to_bytes(4, byteorder="big")
-            self.channel_db.add_channel_update(remote_update_decoded)
-
-    def get_outgoing_gossip_channel_update_for_chan(self, chan: Channel) -> bytes:
-        if chan._outgoing_channel_update is not None:
-            return chan._outgoing_channel_update
-        sorted_node_ids = list(sorted(self.node_ids))
-        channel_flags = b'\x00' if sorted_node_ids[0] == privkey_to_pubkey(self.privkey) else b'\x01'
-        now = int(time.time())
-        htlc_maximum_msat = min(chan.config[REMOTE].max_htlc_value_in_flight_msat, 1000 * chan.constraints.capacity)
-
-        chan_upd = encode_msg(
-            "channel_update",
-            short_channel_id=chan.short_channel_id,
-            channel_flags=channel_flags,
-            message_flags=b'\x01',
-            cltv_expiry_delta=lnutil.NBLOCK_OUR_CLTV_EXPIRY_DELTA.to_bytes(2, byteorder="big"),
-            htlc_minimum_msat=chan.config[REMOTE].htlc_minimum_msat.to_bytes(8, byteorder="big"),
-            htlc_maximum_msat=htlc_maximum_msat.to_bytes(8, byteorder="big"),
-            fee_base_msat=lnutil.OUR_FEE_BASE_MSAT.to_bytes(4, byteorder="big"),
-            fee_proportional_millionths=lnutil.OUR_FEE_PROPORTIONAL_MILLIONTHS.to_bytes(4, byteorder="big"),
-            chain_hash=constants.net.rev_genesis_bytes(),
-            timestamp=now.to_bytes(4, byteorder="big"),
-        )
-        sighash = sha256d(chan_upd[2 + 64:])
-        sig = ecc.ECPrivkey(self.privkey).sign(sighash, sig_string_from_r_and_s)
-        message_type, payload = decode_msg(chan_upd)
-        payload['signature'] = sig
-        chan_upd = encode_msg(message_type, **payload)
-
-        chan._outgoing_channel_update = chan_upd
-        return chan_upd
-
     def send_announcement_signatures(self, chan: Channel):
-
-        bitcoin_keys = [chan.config[REMOTE].multisig_key.pubkey,
-                        chan.config[LOCAL].multisig_key.pubkey]
-
-        sorted_node_ids = list(sorted(self.node_ids))
-        if sorted_node_ids != self.node_ids:
-            node_ids = sorted_node_ids
-            bitcoin_keys.reverse()
-        else:
-            node_ids = self.node_ids
-
-        chan_ann = encode_msg("channel_announcement",
-            len=0,
-            #features not set (defaults to zeros)
-            chain_hash=constants.net.rev_genesis_bytes(),
-            short_channel_id=chan.short_channel_id,
-            node_id_1=node_ids[0],
-            node_id_2=node_ids[1],
-            bitcoin_key_1=bitcoin_keys[0],
-            bitcoin_key_2=bitcoin_keys[1]
-        )
-        to_hash = chan_ann[256+2:]
-        h = sha256d(to_hash)
-        bitcoin_signature = ecc.ECPrivkey(chan.config[LOCAL].multisig_key.privkey).sign(h, sig_string_from_r_and_s)
-        node_signature = ecc.ECPrivkey(self.privkey).sign(h, sig_string_from_r_and_s)
+        chan_ann = chan.construct_channel_announcement_without_sigs()
+        preimage = chan_ann[256+2:]
+        msg_hash = sha256d(preimage)
+        bitcoin_signature = ecc.ECPrivkey(chan.config[LOCAL].multisig_key.privkey).sign(msg_hash, sig_string_from_r_and_s)
+        node_signature = ecc.ECPrivkey(self.privkey).sign(msg_hash, sig_string_from_r_and_s)
         self.send_message("announcement_signatures",
             channel_id=chan.channel_id,
             short_channel_id=chan.short_channel_id,
@@ -1062,7 +991,7 @@ class Peer(Logger):
             bitcoin_signature=bitcoin_signature
         )
 
-        return h, node_signature, bitcoin_signature
+        return msg_hash, node_signature, bitcoin_signature
 
     def on_update_fail_htlc(self, payload):
         channel_id = payload["channel_id"]
@@ -1251,7 +1180,7 @@ class Peer(Logger):
             reason = OnionRoutingFailureMessage(code=OnionFailureCode.UNKNOWN_NEXT_PEER, data=b'')
             await self.fail_htlc(chan, htlc.htlc_id, onion_packet, reason)
             return
-        outgoing_chan_upd = self.get_outgoing_gossip_channel_update_for_chan(next_chan)[2:]
+        outgoing_chan_upd = next_chan.get_outgoing_gossip_channel_update()[2:]
         outgoing_chan_upd_len = len(outgoing_chan_upd).to_bytes(2, byteorder="big")
         if next_chan.get_state() != channel_states.OPEN:
             self.logger.info(f"cannot forward htlc. next_chan not OPEN: {next_chan_scid} in state {next_chan.get_state()}")
@@ -1464,6 +1393,7 @@ class Peer(Logger):
         while True:
             our_sig, closing_tx = chan.make_closing_tx(scriptpubkey, payload['scriptpubkey'], fee_sat=our_fee)
             self.send_message('closing_signed', channel_id=chan.channel_id, fee_satoshis=our_fee, signature=our_sig)
+            # FIXME: the remote SHOULD send closing_signed, but some don't.
             cs_payload = await asyncio.wait_for(self.closing_signed[chan.channel_id].get(), LN_P2P_NETWORK_TIMEOUT)
             their_fee = int.from_bytes(cs_payload['fee_satoshis'], 'big')
             their_sig = cs_payload['signature']

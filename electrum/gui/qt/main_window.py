@@ -513,6 +513,18 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             ])
             self.show_warning(msg, title=_('Watch-only wallet'))
 
+    def warn_if_lightning_backup(self):
+        if self.wallet.is_lightning_backup():
+            msg = '\n\n'.join([
+                _("This file is a backup of a lightning wallet."),
+                _("You will not be able to perform lightning payments using this file, and the lightning balance displayed in this wallet might be outdated.") + ' ' + \
+                _("If you have lost the original wallet file, you can use this file to trigger a forced closure of your channels."),
+                _("Do you want to have your channels force-closed?")
+            ])
+            if self.question(msg, title=_('Lightning Backup')):
+                self.network.maybe_init_lightning()
+                self.wallet.lnworker.start_network(self.network)
+
     def warn_if_testnet(self):
         if not constants.net.TESTNET:
             return
@@ -549,13 +561,13 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             return
         self.gui_object.new_window(filename)
 
-
     def backup_wallet(self):
-        path = self.wallet.storage.path
-        wallet_folder = os.path.dirname(path)
-        filename, __ = QFileDialog.getSaveFileName(self, _('Enter a filename for the copy of your wallet'), wallet_folder)
-        if not filename:
+        try:
+            new_path = self.wallet.save_backup()
+        except BaseException as reason:
+            self.show_critical(_("Electrum was unable to copy your wallet file to the specified location.") + "\n" + str(reason), title=_("Unable to create backup"))
             return
+<<<<<<< HEAD
         new_path = os.path.join(wallet_folder, filename)
         if new_path != path:
             try:
@@ -563,6 +575,12 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
                 self.show_message(_("A copy of your wallet file was created in")+" '%s'" % str(new_path), title=_("Wallet backup created"))
             except BaseException as reason:
                 self.show_critical(_("Electrum-ECC was unable to copy your wallet file to the specified location.") + "\n" + str(reason), title=_("Unable to create backup"))
+=======
+        if new_path:
+            self.show_message(_("A copy of your wallet file was created in")+" '%s'" % str(new_path), title=_("Wallet backup created"))
+        else:
+            self.show_message(_("You need to configure a backup directory in your preferences"), title=_("Backup not created"))
+>>>>>>> 56cb45df7014767d953cf9efd5d5b8266d070064
 
     def update_recently_visited(self, filename):
         recent = self.config.get('recently_open', [])
@@ -604,7 +622,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         self.recently_visited_menu = file_menu.addMenu(_("&Recently open"))
         file_menu.addAction(_("&Open"), self.open_wallet).setShortcut(QKeySequence.Open)
         file_menu.addAction(_("&New/Restore"), self.new_wallet).setShortcut(QKeySequence.New)
-        file_menu.addAction(_("&Save Copy"), self.backup_wallet).setShortcut(QKeySequence.SaveAs)
+        file_menu.addAction(_("&Save backup"), self.backup_wallet).setShortcut(QKeySequence.SaveAs)
         file_menu.addAction(_("Delete"), self.remove_wallet)
         file_menu.addSeparator()
         file_menu.addAction(_("&Quit"), self.close)
@@ -947,6 +965,11 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
     def show_transaction(self, tx, *, tx_desc=None):
         '''tx_desc is set only for txs created in the Send tab'''
         show_transaction(tx, parent=self, desc=tx_desc)
+
+    def show_lightning_transaction(self, tx_item):
+        from .lightning_tx_dialog import LightningTxDialog
+        d = LightningTxDialog(self, tx_item)
+        d.show()
 
     def create_receive_tab(self):
         # A 4-column grid layout.  All the stretch is in the last column.
@@ -1431,10 +1454,12 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             self.notify(_('Payment received') + '\n' + key)
             self.need_update.set()
 
-    def on_invoice_status(self, key, status):
-        if key not in self.wallet.invoices:
+    def on_invoice_status(self, key):
+        req = self.wallet.get_invoice(key)
+        if req is None:
             return
-        self.invoice_list.update_item(key, status)
+        status = req['status']
+        self.invoice_list.update_item(key, req)
         if status == PR_PAID:
             self.show_message(_('Payment succeeded'))
             self.need_update.set()
@@ -1675,7 +1700,7 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
 
         def on_failure(exc_info):
             type_, e, traceback = exc_info
-            self.show_error(_('Could not open channel: {}').format(e))
+            self.show_error(_('Could not open channel: {}').format(repr(e)))
         WaitingDialog(self, _('Opening channel...'), task, on_success, on_failure)
 
     def query_choice(self, msg, choices):
@@ -2175,20 +2200,21 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
             ks_type = str(keystore_types[0]) if keystore_types else _('No keystore')
             grid.addWidget(QLabel(ks_type), 4, 1)
         # lightning
-        if self.wallet.has_lightning():
-            lightning_b = QPushButton(_('Disable'))
-            lightning_b.clicked.connect(dialog.close)
-            lightning_b.clicked.connect(self.disable_lightning)
-            lightning_label = QLabel(_('Enabled'))
-            lightning_b.setDisabled(bool(self.wallet.lnworker.channels))
-        else:
-            lightning_b = QPushButton(_('Enable'))
-            lightning_b.clicked.connect(dialog.close)
-            lightning_b.clicked.connect(self.enable_lightning)
-            lightning_label = QLabel(_('Disabled'))
-        grid.addWidget(QLabel(_('Lightning')), 5, 0)
-        grid.addWidget(lightning_label, 5, 1)
-        grid.addWidget(lightning_b, 5, 2)
+        if self.wallet.can_have_lightning():
+            if self.wallet.has_lightning():
+                lightning_b = QPushButton(_('Disable'))
+                lightning_b.clicked.connect(dialog.close)
+                lightning_b.clicked.connect(self.disable_lightning)
+                lightning_label = QLabel(_('Enabled'))
+                lightning_b.setDisabled(bool(self.wallet.lnworker.channels))
+            else:
+                lightning_b = QPushButton(_('Enable'))
+                lightning_b.clicked.connect(dialog.close)
+                lightning_b.clicked.connect(self.enable_lightning)
+                lightning_label = QLabel(_('Disabled'))
+            grid.addWidget(QLabel(_('Lightning')), 5, 0)
+            grid.addWidget(lightning_label, 5, 1)
+            grid.addWidget(lightning_b, 5, 2)
         vbox.addLayout(grid)
 
         if self.wallet.is_deterministic():

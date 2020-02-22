@@ -5,14 +5,16 @@ from enum import IntEnum
 from PyQt5 import QtCore, QtGui
 from PyQt5.QtCore import Qt
 from PyQt5.QtWidgets import QMenu, QHBoxLayout, QLabel, QVBoxLayout, QGridLayout, QLineEdit
+from PyQt5.QtGui import QFont
 
 from electrum.util import bh2u, NotEnoughFunds, NoDynamicFeeEstimates
 from electrum.i18n import _
-from electrum.lnchannel import Channel
+from electrum.lnchannel import Channel, peer_states
 from electrum.wallet import Abstract_Wallet
 from electrum.lnutil import LOCAL, REMOTE, format_short_channel_id, LN_MAX_FUNDING_SAT
 
-from .util import MyTreeView, WindowModalDialog, Buttons, OkButton, CancelButton, EnterButton, WaitingDialog
+from .util import (MyTreeView, WindowModalDialog, Buttons, OkButton, CancelButton,
+                   EnterButton, WaitingDialog, MONOSPACE_FONT)
 from .amountedit import BTCAmountEdit, FreezableLineEdit
 from .channel_details import ChannelDetailsDialog
 
@@ -48,6 +50,7 @@ class ChannelsList(MyTreeView):
         self.update_single_row.connect(self.do_update_single_row)
         self.network = self.parent.network
         self.lnworker = self.parent.wallet.lnworker
+        self.setSortingEnabled(True)
 
     def format_fields(self, chan):
         labels = {}
@@ -84,10 +87,14 @@ class ChannelsList(MyTreeView):
         WaitingDialog(self, 'please wait..', task, self.on_success, self.on_failure)
 
     def force_close(self, channel_id):
-        def task():
-            coro = self.lnworker.force_close_channel(channel_id)
-            return self.network.run_from_another_thread(coro)
-        if self.parent.question('Force-close channel?\nReclaimed funds will not be immediately available.'):
+        if self.lnworker.wallet.is_lightning_backup():
+            msg = _('WARNING: force-closing from an old state might result in fund loss.\nAre you sure?')
+        else:
+            msg = _('Force-close channel?\nReclaimed funds will not be immediately available.')
+        if self.parent.question(msg):
+            def task():
+                coro = self.lnworker.force_close_channel(channel_id)
+                return self.network.run_from_another_thread(coro)
             WaitingDialog(self, 'please wait..', task, self.on_success, self.on_failure)
 
     def remove_channel(self, channel_id):
@@ -105,9 +112,10 @@ class ChannelsList(MyTreeView):
         menu.addAction(_("Details..."), lambda: self.details(channel_id))
         self.add_copy_menu(menu, idx)
         if not chan.is_closed():
-            menu.addAction(_("Close channel"), lambda: self.close_channel(channel_id))
+            if chan.peer_state == peer_states.GOOD:
+                menu.addAction(_("Close channel"), lambda: self.close_channel(channel_id))
             menu.addAction(_("Force-close channel"), lambda: self.force_close(channel_id))
-        else:
+        if chan.is_redeemed():
             menu.addAction(_("Remove"), lambda: self.remove_channel(channel_id))
         menu.exec_(self.viewport().mapToGlobal(position))
 
@@ -122,6 +130,7 @@ class ChannelsList(MyTreeView):
             if item.data(ROLE_CHANNEL_ID) == chan.channel_id:
                 for column, v in enumerate(self.format_fields(chan)):
                     self.model().item(row, column).setData(v, QtCore.Qt.DisplayRole)
+        self.update_can_send(self.parent.wallet.lnworker)
 
     @QtCore.pyqtSlot(Abstract_Wallet)
     def do_update_rows(self, wallet):
@@ -130,16 +139,29 @@ class ChannelsList(MyTreeView):
         lnworker = self.parent.wallet.lnworker
         if not lnworker:
             return
+        self.update_can_send(lnworker)
         self.model().clear()
         self.update_headers(self.headers)
         for chan in lnworker.channels.values():
             items = [QtGui.QStandardItem(x) for x in self.format_fields(chan)]
             self.set_editability(items)
             items[self.Columns.NODE_ID].setData(chan.channel_id, ROLE_CHANNEL_ID)
+            items[self.Columns.NODE_ID].setFont(QFont(MONOSPACE_FONT))
+            items[self.Columns.LOCAL_BALANCE].setFont(QFont(MONOSPACE_FONT))
+            items[self.Columns.REMOTE_BALANCE].setFont(QFont(MONOSPACE_FONT))
             self.model().insertRow(0, items)
+
+    def update_can_send(self, lnworker):
+        msg = _('Can send') + ' ' + self.parent.format_amount(lnworker.can_send())\
+              + ' ' + self.parent.base_unit() + '; '\
+              + _('can receive') + ' ' + self.parent.format_amount(lnworker.can_receive())\
+              + ' ' + self.parent.base_unit()
+        self.can_send_label.setText(msg)
 
     def get_toolbar(self):
         h = QHBoxLayout()
+        self.can_send_label = QLabel('')
+        h.addWidget(self.can_send_label)
         h.addStretch()
         h.addWidget(EnterButton(_('Open Channel'), self.new_channel_dialog))
         return h
