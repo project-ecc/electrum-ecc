@@ -567,20 +567,11 @@ class ElectrumWindow(QMainWindow, MessageBoxMixin, Logger):
         except BaseException as reason:
             self.show_critical(_("Electrum was unable to copy your wallet file to the specified location.") + "\n" + str(reason), title=_("Unable to create backup"))
             return
-<<<<<<< HEAD
-        new_path = os.path.join(wallet_folder, filename)
-        if new_path != path:
-            try:
-                shutil.copy2(path, new_path)
-                self.show_message(_("A copy of your wallet file was created in")+" '%s'" % str(new_path), title=_("Wallet backup created"))
-            except BaseException as reason:
-                self.show_critical(_("Electrum-ECC was unable to copy your wallet file to the specified location.") + "\n" + str(reason), title=_("Unable to create backup"))
-=======
+
         if new_path:
             self.show_message(_("A copy of your wallet file was created in")+" '%s'" % str(new_path), title=_("Wallet backup created"))
         else:
             self.show_message(_("You need to configure a backup directory in your preferences"), title=_("Backup not created"))
->>>>>>> 56cb45df7014767d953cf9efd5d5b8266d070064
 
     def update_recently_visited(self, filename):
         recent = self.config.get('recently_open', [])
