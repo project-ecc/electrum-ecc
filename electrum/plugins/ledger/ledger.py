@@ -34,6 +34,7 @@ try:
     from btchip.btchipException import BTChipException
     BTCHIP = True
     BTCHIP_DEBUG = False
+    from .eccoinOverwrites import eccoinTransaction
 except ImportError:
     BTCHIP = False
 
@@ -332,7 +333,6 @@ class Ledger_KeyStore(Hardware_KeyStore):
         for txin in tx.inputs():
             if txin.is_coinbase_input():
                 self.give_error("Coinbase not supported")     # should never happen
-
             if txin.script_type in ['p2sh']:
                 p2shTransaction = True
 
@@ -422,7 +422,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
                     chipInputs.append({'value' : tmp, 'witness' : True, 'sequence' : sequence})
                     redeemScripts.append(bfh(utxo[2]))
                 elif not p2shTransaction:
-                    txtmp = bitcoinTransaction(bfh(utxo[0]))
+                    txtmp = eccoinTransaction(bfh(utxo[0])) # overwritten bitcoinTransaction class for eccoin specific transaction
                     trustedInput = self.get_client().getTrustedInput(txtmp, utxo[1])
                     trustedInput['sequence'] = sequence
                     chipInputs.append(trustedInput)
@@ -443,7 +443,8 @@ class Ledger_KeyStore(Hardware_KeyStore):
                                                             chipInputs, redeemScripts[inputIndex], version=tx.version)
                 # we don't set meaningful outputAddress, amount and fees
                 # as we only care about the alternateEncoding==True branch
-                outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
+                #outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
+                outputData = self.get_client().finalizeInputFull(txOutput)
                 outputData['outputData'] = txOutput
                 if outputData['confirmationNeeded']:
                     outputData['address'] = output
@@ -469,7 +470,8 @@ class Ledger_KeyStore(Hardware_KeyStore):
                                                                 chipInputs, redeemScripts[inputIndex], version=tx.version)
                     # we don't set meaningful outputAddress, amount and fees
                     # as we only care about the alternateEncoding==True branch
-                    outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
+                    #outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
+                    outputData = self.get_client().finalizeInputFull(txOutput)
                     outputData['outputData'] = txOutput
                     if outputData['confirmationNeeded']:
                         outputData['address'] = output
