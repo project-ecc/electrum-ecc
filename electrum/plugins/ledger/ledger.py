@@ -4,13 +4,13 @@ import sys
 import traceback
 from typing import Optional
 
-from electrum import ecc
+from electrum import ecc, constants
 from electrum import bip32
 from electrum.crypto import hash_160
 from electrum.bitcoin import int_to_hex, var_int, is_segwit_script_type
 from electrum.bip32 import BIP32Node, convert_bip32_intpath_to_strpath
 from electrum.i18n import _
-from electrum.keystore import Hardware_KeyStore
+from electrum.keystore import Hardware_KeyStore, Xpub
 from electrum.transaction import Transaction, PartialTransaction, PartialTxInput, PartialTxOutput
 from electrum.wallet import Standard_Wallet
 from electrum.util import bfh, bh2u, versiontuple, UserFacingException
@@ -23,15 +23,101 @@ from ..hw_wallet.plugin import is_any_tx_output_on_change_branch, validate_op_re
 
 _logger = get_logger(__name__)
 
+class eccoinTransaction:
+    def __init__(self, data=None):
+        self.version = ""
+        self.timestamp = ""
+        self.inputs = []
+        self.outputs = []
+        self.lockTime = ""
+        self.witness = False
+        self.witnessScript = ""
+        if data is not None:
+            offset = 0
+            self.version = data[offset:offset + 4]
+            offset += 4
+            self.timestamp = data[offset:offset + 4]
+            offset += 4
+            if (data[offset] == 0) and (data[offset + 1] != 0):
+                offset += 2
+                self.witness = True
+            inputSize = readVarint(data, offset)
+            offset += inputSize['size']
+            numInputs = inputSize['value']
+            for i in range(numInputs):
+                tmp = { 'buffer': data, 'offset' : offset}
+                self.inputs.append(bitcoinInput(tmp))
+                offset = tmp['offset']
+            outputSize = readVarint(data, offset)
+            offset += outputSize['size']
+            numOutputs = outputSize['value']
+            for i in range(numOutputs):
+                tmp = { 'buffer': data, 'offset' : offset}
+                self.outputs.append(bitcoinOutput(tmp))
+                offset = tmp['offset']
+            if self.witness:
+                self.witnessScript = data[offset : len(data) - 4]
+                self.lockTime = data[len(data) - 4:]
+            else:
+                self.lockTime = data[offset:offset + 4]
+
+    def serialize(self, skipOutputLocktime=False, skipWitness=False):
+        if skipWitness or (not self.witness):
+            useWitness = False
+        else:
+            useWitness = True
+        result = []
+        result.extend(self.version)
+        if useWitness:
+            result.append(0x00)
+            result.append(0x01)
+        writeVarint(len(self.inputs), result)
+        for trinput in self.inputs:
+            result.extend(trinput.serialize())
+        if not skipOutputLocktime:
+            writeVarint(len(self.outputs), result)
+            for troutput in self.outputs:
+                result.extend(troutput.serialize())
+            if useWitness:
+                result.extend(self.witnessScript)
+            result.extend(self.lockTime)
+        return result
+
+    def serializeOutputs(self):
+        result = []
+        writeVarint(len(self.outputs), result)
+        for troutput in self.outputs:
+            result.extend(troutput.serialize())
+        return result
+
+    def __str__(self):
+        buf =  "Version : " + hexlify(self.version) + "\r\n"
+        buf =  "Timestamp : " + hexlify(self.timestamp) + "\r\n"
+        index = 1
+        for trinput in self.inputs:
+            buf += "Input #" + str(index) + "\r\n"
+            buf += str(trinput)
+            index+=1
+        index = 1
+        for troutput in self.outputs:
+            buf += "Output #" + str(index) + "\r\n"
+            buf += str(troutput)
+            index+=1
+        buf += "Locktime : " + hexlify(self.lockTime) + "\r\n"
+        if self.witness:
+            buf += "Witness script : " + hexlify(self.witnessScript) + "\r\n"
+        return buf
 
 try:
     import hid
     from btchip.btchipComm import HIDDongleHIDAPI, DongleWait
     from btchip.btchip import btchip
     from btchip.btchipUtils import compress_public_key,format_transaction, get_regular_input_script, get_p2sh_input_script
-    from btchip.bitcoinTransaction import bitcoinTransaction
+    from btchip.bitcoinTransaction import bitcoinTransaction, bitcoinInput, bitcoinOutput
     from btchip.btchipFirmwareWizard import checkFirmware, updateFirmware
     from btchip.btchipException import BTChipException
+    from btchip.bitcoinVarint import *
+    bitcoinTransaction = eccoinTransaction
     BTCHIP = True
     BTCHIP_DEBUG = False
     from .eccoinOverwrites import eccoinTransaction
@@ -46,6 +132,78 @@ MULTI_OUTPUT_SUPPORT = '1.1.4'
 SEGWIT_SUPPORT = '1.1.10'
 SEGWIT_SUPPORT_SPECIAL = '1.0.4'
 
+class btchip_eccoin(btchip):
+    def __init__(self, dongle):
+        btchip.__init__(self, dongle)
+
+    # change to original btchip: version field has to contain tx version AND type
+    def startUntrustedTransaction(self, newTransaction, inputIndex, outputList, redeemScript, version, timestamp, cashAddr=False, continueSegwit=False):
+        # Start building a fake transaction with the passed inputs
+        segwit = False
+        if newTransaction:
+            for passedOutput in outputList:
+                if ('witness' in passedOutput) and passedOutput['witness']:
+                    segwit = True
+                    break
+        if newTransaction:
+            if segwit:
+                p2 = 0x03 if cashAddr else 0x02
+            else:
+                p2 = 0x00
+        else:
+                p2 = 0x10 if continueSegwit else 0x80
+        apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x00, p2 ]
+        params = bytearray(version.to_bytes(4, byteorder="little"))
+        params += timestamp.to_bytes(4, byteorder="big")
+        print(params.hex())
+        writeVarint(len(outputList), params)
+        apdu.append(len(params))
+        apdu.extend(params)
+        self.dongle.exchange(bytearray(apdu))
+        # Loop for each input
+        currentIndex = 0
+        for passedOutput in outputList:
+            if ('sequence' in passedOutput) and passedOutput['sequence']:
+                sequence = bytearray(unhexlify(passedOutput['sequence']))
+            else:
+                sequence = bytearray([0xFF, 0xFF, 0xFF, 0xFF]) # default sequence
+            apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00 ]
+            params = []
+            script = bytearray(redeemScript)
+            if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
+                params.append(0x01)
+            elif ('witness' in passedOutput) and passedOutput['witness']:
+                params.append(0x02)
+            else:
+                params.append(0x00)
+            if ('trustedInput' in passedOutput) and passedOutput['trustedInput']:
+                params.append(len(passedOutput['value']))
+            params.extend(passedOutput['value'])
+            if currentIndex != inputIndex:
+                script = bytearray()
+            writeVarint(len(script), params)
+            apdu.append(len(params))
+            apdu.extend(params)
+            self.dongle.exchange(bytearray(apdu))
+            offset = 0
+            while(offset < len(script)):
+                blockLength = 255
+                if ((offset + blockLength) < len(script)):
+                    dataLength = blockLength
+                else:
+                    dataLength = len(script) - offset
+                params = script[offset : offset + dataLength]
+                if ((offset + dataLength) == len(script)):
+                    params.extend(sequence)
+                apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00, len(params) ]
+                apdu.extend(params)
+                self.dongle.exchange(bytearray(apdu))
+                offset += blockLength
+            if len(script) == 0:
+                apdu = [ self.BTCHIP_CLA, self.BTCHIP_INS_HASH_INPUT_START, 0x80, 0x00, len(sequence) ]
+                apdu.extend(sequence)
+                self.dongle.exchange(bytearray(apdu))
+            currentIndex += 1
 
 def test_pin_unlocked(func):
     """Function decorator to test the Ledger for being unlocked, and if not,
@@ -64,7 +222,7 @@ def test_pin_unlocked(func):
 
 class Ledger_Client(HardwareClientBase):
     def __init__(self, hidDevice, *, is_hw1: bool = False):
-        self.dongleObject = btchip(hidDevice)
+        self.dongleObject = btchip_eccoin(hidDevice)
         self.preflightDone = False
         self._is_hw1 = is_hw1
 
@@ -440,7 +598,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
             self.get_client().enableAlternate2fa(False)
             if segwitTransaction:
                 self.get_client().startUntrustedTransaction(True, inputIndex,
-                                                            chipInputs, redeemScripts[inputIndex], version=tx.version)
+                                                            chipInputs, redeemScripts[inputIndex], version=tx.version, timestamp=tx.timestamp)
                 # we don't set meaningful outputAddress, amount and fees
                 # as we only care about the alternateEncoding==True branch
                 #outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
@@ -456,7 +614,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
                 while inputIndex < len(inputs):
                     singleInput = [ chipInputs[inputIndex] ]
                     self.get_client().startUntrustedTransaction(False, 0,
-                                                            singleInput, redeemScripts[inputIndex], version=tx.version)
+                                                            singleInput, redeemScripts[inputIndex], version=tx.version, timestamp=tx.timestamp)
                     inputSignature = self.get_client().untrustedHashSign(inputsPaths[inputIndex], pin, lockTime=tx.locktime)
                     inputSignature[0] = 0x30 # force for 1.4.9+
                     my_pubkey = inputs[inputIndex][4]
@@ -467,7 +625,7 @@ class Ledger_KeyStore(Hardware_KeyStore):
             else:
                 while inputIndex < len(inputs):
                     self.get_client().startUntrustedTransaction(firstTransaction, inputIndex,
-                                                                chipInputs, redeemScripts[inputIndex], version=tx.version)
+                                                                chipInputs, redeemScripts[inputIndex], version=tx.version, timestamp=tx.timestamp)
                     # we don't set meaningful outputAddress, amount and fees
                     # as we only care about the alternateEncoding==True branch
                     #outputData = self.get_client().finalizeInput(b'', 0, 0, changePath, bfh(rawTx))
@@ -598,6 +756,25 @@ class LedgerPlugin(HW_PluginBase):
                                       _('Make sure it is in the correct state.'))
         client.handler = self.create_handler(wizard)
         client.get_xpub("m/44'/319'", 'standard') # TODO replace by direct derivation once Nano S > 1.1
+
+	def get_password_for_storage_encryption(self) -> str:
+        # since ledger firware 1.6.1 we need to provide the full derivation path
+        # see https://support.ledger.com/hc/en-us/articles/360015738179-Derivation-path-vulnerability-in-Bitcoin-derivati>
+        derivation = ("m/44'"
+                       "/" + str(constants.net.BIP44_COIN_TYPE) + "'"
+            "/4541509'"      # ascii 'ELE'  as decimal ("BIP43 purpose")
+            "/1112098098'")  # ascii 'BIE2' as decimal
+        # note: using a different password based on hw device type is highly undesirable! see #5993
+        xpub = self.get_xpub(derivation, "standard")
+        password = Xpub.get_pubkey_from_xpub(xpub, ()).hex()
+        return password
+
+    def request_root_fingerprint_from_device(self) -> str:
+        # since ledger firware 1.6.1 we need to provide the full derivation path
+        # see https://support.ledger.com/hc/en-us/articles/360015738179-Derivation-path-vulnerability-in-Bitcoin-derivati>
+        child_of_root_xpub = self.get_xpub("m/44'/" + str(constants.net.BIP44_COIN_TYPE) + "'", xtype='standard')
+        root_fingerprint = BIP32Node.from_xkey(child_of_root_xpub).fingerprint.hex().lower()
+        return root_fingerprint
 
     def get_xpub(self, device_id, derivation, xtype, wizard):
         if xtype not in self.SUPPORTED_XTYPES:
