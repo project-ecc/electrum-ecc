@@ -540,7 +540,7 @@ class Transaction:
         self._locktime = 0
         self._version = 1
         self._timestamp = int(time.time())
-        self._serviceHash = ""
+        self._serviceHash = b''
 
         self._cached_txid = None  # type: Optional[str]
 
@@ -566,9 +566,18 @@ class Transaction:
     def timestamp(self):
         return self._timestamp
 
-    @version.setter
+    @timestamp.setter
     def timestamp(self, value):
         self._timestamp = value
+        self.invalidate_ser_cache()
+
+    @property
+    def serviceHash(self):
+        return self._serviceHash
+
+    @serviceHash.setter
+    def serviceHash(self):
+        self._serviceHash = value
         self.invalidate_ser_cache()
 
     def to_json(self) -> dict:
@@ -579,6 +588,8 @@ class Transaction:
             'inputs': [txin.to_json() for txin in self.inputs()],
             'outputs': [txout.to_json() for txout in self.outputs()],
         }
+        if self.version > 1:
+            d.update({'serviceHash': serviceHash.hex()})
         return d
 
     def inputs(self) -> Sequence[TxInput]:
@@ -848,9 +859,9 @@ class Transaction:
             marker = '00'
             flag = '01'
             witness = ''.join(self.serialize_witness(x, estimate_size=estimate_size) for x in inputs)
-            return nVersion + nTimeStamp + marker + flag + txins + txouts + witness + nLocktime + self.serviceHash
+            return nVersion + nTimeStamp + marker + flag + txins + txouts + witness + nLocktime + self.serviceHash.hex()
         else:
-            return nVersion + nTimeStamp + txins + txouts + nLocktime + self.serviceHash
+            return nVersion + nTimeStamp + txins + txouts + nLocktime + self.serviceHash.hex()
 
     def txid(self) -> Optional[str]:
         if self._cached_txid is None:
@@ -1582,6 +1593,7 @@ class PartialTransaction(Transaction):
         res._inputs = [PartialTxInput.from_txin(txin) for txin in tx.inputs()]
         res._outputs = [PartialTxOutput.from_txout(txout) for txout in tx.outputs()]
         res.version = tx.version
+        res.timestamp = tx.timestamp
         res.locktime = tx.locktime
         return res
 
@@ -1829,12 +1841,12 @@ class PartialTransaction(Transaction):
             scriptCode = var_int(len(preimage_script) // 2) + preimage_script
             amount = int_to_hex(txin.value_sats(), 8)
             nSequence = int_to_hex(txin.nsequence, 4)
-            preimage = nVersion + nTimeStamp + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime + nHashType
+            preimage = nVersion + nTimeStamp + hashPrevouts + hashSequence + outpoint + scriptCode + amount + nSequence + hashOutputs + nLocktime  + self.serviceHash.hex() + nHashType
         else:
             txins = var_int(len(inputs)) + ''.join(self.serialize_input(txin, preimage_script if txin_index==k else '')
                                                    for k, txin in enumerate(inputs))
             txouts = var_int(len(outputs)) + ''.join(o.serialize_to_network().hex() for o in outputs)
-            preimage = nVersion + nTimeStamp + txins + txouts + nLocktime + nHashType
+            preimage = nVersion + nTimeStamp + txins + txouts + nLocktime + self.serviceHash.hex() + nHashType
         return preimage
 
     def sign(self, keypairs) -> None:
