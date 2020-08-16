@@ -132,9 +132,10 @@ class TxDialog(Factory.Popup):
         self.tx = tx  # type: Transaction
         self._action_button_fn = lambda btn: None
 
-        # if the wallet can populate the inputs with more info, do it now.
-        # as a result, e.g. we might learn an imported address tx is segwit,
-        # or that a beyond-gap-limit address is is_mine
+        # If the wallet can populate the inputs with more info, do it now.
+        # As a result, e.g. we might learn an imported address tx is segwit,
+        # or that a beyond-gap-limit address is is_mine.
+        # note: this might fetch prev txs over the network.
         tx.add_info_from_wallet(self.wallet)
 
     def on_open(self):
@@ -173,7 +174,7 @@ class TxDialog(Factory.Popup):
         risk_of_burning_coins = (isinstance(self.tx, PartialTransaction)
                                  and self.can_sign
                                  and fee is not None
-                                 and self.tx.is_there_risk_of_burning_coins_as_fees())
+                                 and bool(self.wallet.get_warning_for_risk_of_burning_coins_as_fees(self.tx)))
         if fee is not None and not risk_of_burning_coins:
             self.fee_str = format_amount(fee)
             fee_per_kb = fee / self.tx.estimated_size() * 1000
@@ -186,7 +187,7 @@ class TxDialog(Factory.Popup):
         for dict_entry in self.ids.output_list.data:
             dict_entry['color'], dict_entry['background_color'] = address_colors(self.wallet, dict_entry['address'])
 
-        self.is_local_tx = tx_mined_status.height == TX_HEIGHT_LOCAL
+        self.can_remove_tx = tx_details.can_remove
         self.update_action_button()
 
     def update_action_button(self):
@@ -195,7 +196,7 @@ class TxDialog(Factory.Popup):
             ActionButtonOption(text=_('Sign'), func=lambda btn: self.do_sign(), enabled=self.can_sign),
             ActionButtonOption(text=_('Broadcast'), func=lambda btn: self.do_broadcast(), enabled=self.can_broadcast),
             ActionButtonOption(text=_('Bump fee'), func=lambda btn: self.do_rbf(), enabled=self.can_rbf),
-            ActionButtonOption(text=_('Remove'), func=lambda btn: self.remove_local_tx(), enabled=self.is_local_tx),
+            ActionButtonOption(text=_('Remove'), func=lambda btn: self.remove_local_tx(), enabled=self.can_remove_tx),
         )
         num_options = sum(map(lambda o: bool(o.enabled), options))
         # if no options available, hide button
@@ -253,7 +254,7 @@ class TxDialog(Factory.Popup):
         self.do_sign()
 
     def do_sign(self):
-        self.app.protected(_("Enter your PIN code in order to sign this transaction"), self._do_sign, ())
+        self.app.protected(_("Sign this transaction?"), self._do_sign, ())
 
     def _do_sign(self, password):
         self.status_str = _('Signing') + '...'

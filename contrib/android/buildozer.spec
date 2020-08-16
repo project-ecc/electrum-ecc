@@ -13,7 +13,7 @@ package.domain = org.ecc
 source.dir = .
 
 # (list) Source files to include (let empty to include all the files)
-source.include_exts = py,png,jpg,kv,atlas,ttf,txt,gif,pem,mo,vs,fs,json
+source.include_exts = py,png,jpg,kv,atlas,ttf,txt,gif,pem,mo,vs,fs,json,csv
 
 # (list) Source files to exclude (let empty to not exclude anything)
 source.exclude_exts = spec
@@ -22,10 +22,9 @@ source.exclude_exts = spec
 source.exclude_dirs = bin, build, dist, contrib,
     electrum/tests,
     electrum/gui/qt,
-    electrum/gui/kivy/tools,
     electrum/gui/kivy/theming/light,
-    # exclude pycryptodomex built by make_packages; android needs custom version
-    packages/cryptodome
+    packages/qdarkstyle,
+    packages/qtpy
 # (list) List of exclusions using pattern matching
 source.exclude_patterns = Makefile,setup*
 
@@ -39,7 +38,9 @@ version.filename = %(source.dir)s/electrum/version.py
 # (list) Application requirements
 
 requirements =
-    python3,
+    # note: re python3.8, see #6147
+    hostpython3==3.7.7,
+    python3==3.7.7,
     android,
     openssl,
     plyer,
@@ -47,8 +48,8 @@ requirements =
     kivy==39c17457bae91baf8fe710dc989791e45879f136,
     libffi,
     libsecp256k1,
-    scrypt,
-    pycryptodomex==bfc1cca093a7344c9ed2b7c34bc560db6dca662a
+	scrypt,
+    cryptography
 
 # (str) Presplash of the application
 #presplash.filename = %(source.dir)s/gui/kivy/theming/splash.png
@@ -78,7 +79,7 @@ android.api = 28
 android.minapi = 21
 
 # (str) Android NDK version to use
-android.ndk = 19b
+android.ndk = 19c
 
 # (int) Android NDK API to use (optional). This is the minimum API your app will support.
 android.ndk_api = 21
@@ -125,7 +126,7 @@ android.add_activities = org.electrum.qr.SimpleScannerActivity
 #android.ouya.icon.filename = %(source.dir)s/data/ouya_icon.png
 
 # (str) XML file to include as an intent filters in <activity> tag
-android.manifest.intent_filters = electrum/gui/kivy/tools/bitcoin_intent.xml
+android.manifest.intent_filters = contrib/android/bitcoin_intent.xml
 
 # (str) launchMode to set for the main activity
 android.manifest.launch_mode = singleTask

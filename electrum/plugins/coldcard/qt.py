@@ -57,7 +57,7 @@ class Plugin(ColdcardPlugin, QtPluginBase):
         btn = QPushButton(_("Export for Coldcard"))
         btn.clicked.connect(lambda unused: self.export_multisig_setup(main_window, wallet))
 
-        return Buttons(btn, CloseButton(dialog))
+        return btn
 
     def export_multisig_setup(self, main_window, wallet):
 
@@ -70,24 +70,6 @@ class Plugin(ColdcardPlugin, QtPluginBase):
                 ColdcardPlugin.export_ms_wallet(wallet, f, basename)
             main_window.show_message(_("Wallet setup file exported successfully"))
 
-    @hook
-    def transaction_dialog(self, dia: TxDialog):
-        # if not a Coldcard wallet, hide feature
-        if not any(type(ks) == self.keystore_class for ks in dia.wallet.get_keystores()):
-            return
-
-        def gettx_for_coldcard_export() -> PartialTransaction:
-            if not isinstance(dia.tx, PartialTransaction):
-                raise Exception("Can only export partial transactions for {}.".format(self.device))
-            tx = copy.deepcopy(dia.tx)
-            tx.add_info_from_wallet(dia.wallet, include_xpubs_and_full_paths=True)
-            return tx
-
-        # add a new "export" option
-        export_submenu = dia.export_actions_menu.addMenu(_("For {}; include xpubs").format(self.device))
-        dia.add_export_actions_to_menu(export_submenu, gettx=gettx_for_coldcard_export)
-        dia.psbt_only_widgets.append(export_submenu)
-
     def show_settings_dialog(self, window, keystore):
         # When they click on the icon for CC we come here.
         # - doesn't matter if device not connected, continue
@@ -95,15 +77,10 @@ class Plugin(ColdcardPlugin, QtPluginBase):
 
 
 class Coldcard_Handler(QtHandlerBase):
-    setup_signal = pyqtSignal()
-    #auth_signal = pyqtSignal(object)
 
     def __init__(self, win):
         super(Coldcard_Handler, self).__init__(win, 'Coldcard')
-        self.setup_signal.connect(self.setup_dialog)
-        #self.auth_signal.connect(self.auth_dialog)
 
-    
     def message_dialog(self, msg):
         self.clear_dialog()
         self.dialog = dialog = WindowModalDialog(self.top_level_window(), _("Coldcard Status"))
@@ -111,16 +88,7 @@ class Coldcard_Handler(QtHandlerBase):
         vbox = QVBoxLayout(dialog)
         vbox.addWidget(l)
         dialog.show()
-        
-    def get_setup(self):
-        self.done.clear()
-        self.setup_signal.emit()
-        self.done.wait()
-        return 
-        
-    def setup_dialog(self):
-        self.show_error(_('Please initialize your Coldcard while disconnected.'))
-        return
+
 
 class CKCCSettingsDialog(WindowModalDialog):
 

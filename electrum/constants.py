@@ -121,6 +121,7 @@ class BitcoinTestnet(AbstractNet):
     XPUB_HEADERS_INV = inv_dict(XPUB_HEADERS)
 
     BIP44_COIN_TYPE = 319
+    LN_REALM_BYTE = 1
     LN_DNS_SEEDS = []
 
 

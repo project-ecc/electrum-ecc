@@ -36,19 +36,20 @@ from .bitcoin import deserialize_privkey, serialize_privkey
 from .transaction import Transaction, PartialTransaction, PartialTxInput, PartialTxOutput, TxInput
 from .bip32 import (convert_bip32_path_to_list_of_uint32, BIP32_PRIME,
                     is_xpub, is_xprv, BIP32Node, normalize_bip32_derivation,
-                    convert_bip32_intpath_to_strpath)
+                    convert_bip32_intpath_to_strpath, is_xkey_consistent_with_key_origin_info)
 from .ecc import string_to_number
 from .crypto import (pw_decode, pw_encode, sha256, sha256d, PW_HASH_VERSION_LATEST,
                      SUPPORTED_PW_HASH_VERSIONS, UnsupportedPasswordHashVersion, hash_160)
 from .util import (InvalidPassword, WalletFileException,
-                   BitcoinException, bh2u, bfh, inv_dict)
-from .mnemonic import Mnemonic, load_wordlist, seed_type, is_seed
+                   BitcoinException, bh2u, bfh, inv_dict, is_hex_str)
+from .mnemonic import Mnemonic, Wordlist, seed_type, is_seed
 from .plugin import run_hook
 from .logging import Logger
 
 if TYPE_CHECKING:
     from .gui.qt.util import TaskThread
-    from .plugins.hw_wallet import HW_PluginBase, HardwareClientBase
+    from .plugins.hw_wallet import HW_PluginBase, HardwareClientBase, HardwareHandlerBase
+    from .wallet_db import WalletDB
 
 
 class KeyStore(Logger, ABC):
@@ -463,10 +464,20 @@ class Xpub(MasterPublicKeyMixin):
         self.add_key_origin(derivation_prefix=derivation_prefix,
                             root_fingerprint=root_node.calc_fingerprint_of_this_node().hex().lower())
 
-    def add_key_origin(self, *, derivation_prefix: Optional[str], root_fingerprint: Optional[str]):
+    def add_key_origin(self, *, derivation_prefix: str = None, root_fingerprint: str = None) -> None:
         assert self.xpub
-        self._root_fingerprint = root_fingerprint
-        self._derivation_prefix = normalize_bip32_derivation(derivation_prefix)
+        if not (root_fingerprint is None or (is_hex_str(root_fingerprint) and len(root_fingerprint) == 8)):
+            raise Exception("root fp must be 8 hex characters")
+        derivation_prefix = normalize_bip32_derivation(derivation_prefix)
+        if not is_xkey_consistent_with_key_origin_info(self.xpub,
+                                                       derivation_prefix=derivation_prefix,
+                                                       root_fingerprint=root_fingerprint):
+            raise Exception("xpub inconsistent with provided key origin info")
+        if root_fingerprint is not None:
+            self._root_fingerprint = root_fingerprint
+        if derivation_prefix is not None:
+            self._derivation_prefix = derivation_prefix
+        self.is_requesting_to_be_rewritten_to_wallet_file = True
 
     @lru_cache(maxsize=None)
     def derive_pubkey(self, for_change: int, n: int) -> bytes:
@@ -713,7 +724,8 @@ class Hardware_KeyStore(Xpub, KeyStore):
         # device reconnects
         self.xpub = d.get('xpub')
         self.label = d.get('label')
-        self.handler = None
+        self.soft_device_id = d.get('soft_device_id')  # type: Optional[str]
+        self.handler = None  # type: Optional[HardwareHandlerBase]
         run_hook('init_keystore', self)
 
     def set_label(self, label):
@@ -736,6 +748,7 @@ class Hardware_KeyStore(Xpub, KeyStore):
             'derivation': self.get_derivation_prefix(),
             'root_fingerprint': self.get_root_fingerprint(),
             'label':self.label,
+            'soft_device_id': self.soft_device_id,
         }
 
     def unpaired(self):
@@ -755,12 +768,8 @@ class Hardware_KeyStore(Xpub, KeyStore):
         return False
 
     def get_password_for_storage_encryption(self) -> str:
-        from .storage import get_derivation_used_for_hw_device_encryption
         client = self.plugin.get_client(self)
-        derivation = get_derivation_used_for_hw_device_encryption()
-        xpub = client.get_xpub(derivation, "standard")
-        password = self.get_pubkey_from_xpub(xpub, ()).hex()
-        return password
+        return client.get_password_for_storage_encryption()
 
     def has_usable_connection_with_device(self) -> bool:
         if not hasattr(self, 'plugin'):
@@ -780,6 +789,9 @@ class Hardware_KeyStore(Xpub, KeyStore):
             self.is_requesting_to_be_rewritten_to_wallet_file = True
         if self.label != client.label():
             self.label = client.label()
+            self.is_requesting_to_be_rewritten_to_wallet_file = True
+        if self.soft_device_id != client.get_soft_device_id():
+            self.soft_device_id = client.get_soft_device_id()
             self.is_requesting_to_be_rewritten_to_wallet_file = True
 
 
@@ -805,7 +817,7 @@ def bip39_is_checksum_valid(mnemonic: str) -> Tuple[bool, bool]:
     """
     words = [ normalize('NFKD', word) for word in mnemonic.split() ]
     words_len = len(words)
-    wordlist = load_wordlist("english.txt")
+    wordlist = Wordlist.from_file("english.txt")
     n = len(wordlist)
     i = 0
     words.reverse()
@@ -880,8 +892,9 @@ def hardware_keystore(d) -> Hardware_KeyStore:
     raise WalletFileException(f'unknown hardware type: {hw_type}. '
                               f'hw_keystores: {list(hw_keystores)}')
 
-def load_keystore(db, name) -> KeyStore:
+def load_keystore(db: 'WalletDB', name: str) -> KeyStore:
     d = db.get(name, {})
+    d = dict(d)  # convert to dict from StoredDict (see #6066)
     t = d.get('type')
     if not t:
         raise WalletFileException(

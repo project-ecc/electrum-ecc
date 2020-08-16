@@ -181,6 +181,9 @@ class TxOutpoint(NamedTuple):
     def to_str(self) -> str:
         return f"{self.txid.hex()}:{self.out_idx}"
 
+    def to_json(self):
+        return [self.txid.hex(), self.out_idx]
+
     def serialize_to_network(self) -> bytes:
         return self.txid[::-1] + bfh(int_to_hex(self.out_idx, 4))
 
@@ -233,6 +236,12 @@ class TxInput:
             d['witness'] = self.witness.hex()
         return d
 
+    def witness_elements(self)-> Sequence[bytes]:
+        vds = BCDataStream()
+        vds.write(self.witness)
+        n = vds.read_compact_size()
+        return list(vds.read_bytes(vds.read_compact_size()) for i in range(n))
+
 
 class BCDataStream(object):
     """Workalike python implementation of Bitcoin's CDataStream class."""
@@ -245,7 +254,8 @@ class BCDataStream(object):
         self.input = None
         self.read_cursor = 0
 
-    def write(self, _bytes):  # Initialize with string of _bytes
+    def write(self, _bytes: Union[bytes, bytearray]):  # Initialize with string of _bytes
+        assert isinstance(_bytes, (bytes, bytearray))
         if self.input is None:
             self.input = bytearray(_bytes)
         else:
@@ -272,20 +282,30 @@ class BCDataStream(object):
         self.write_compact_size(len(string))
         self.write(string)
 
-    def read_bytes(self, length) -> bytes:
-        try:
-            result = self.input[self.read_cursor:self.read_cursor+length]  # type: bytearray
+    def read_bytes(self, length: int) -> bytes:
+        if self.input is None:
+            raise SerializationError("call write(bytes) before trying to deserialize")
+        assert length >= 0
+        input_len = len(self.input)
+        read_begin = self.read_cursor
+        read_end = read_begin + length
+        if 0 <= read_begin <= read_end <= input_len:
+            result = self.input[read_begin:read_end]  # type: bytearray
             self.read_cursor += length
             return bytes(result)
-        except IndexError:
-            raise SerializationError("attempt to read past end of buffer") from None
+        else:
+            raise SerializationError('attempt to read past end of buffer')
+
+    def write_bytes(self, _bytes: Union[bytes, bytearray], length: int):
+        assert len(_bytes) == length, len(_bytes)
+        self.write(_bytes)
 
     def can_read_more(self) -> bool:
         if not self.input:
             return False
         return self.read_cursor < len(self.input)
 
-    def read_boolean(self): return self.read_bytes(1)[0] != chr(0)
+    def read_boolean(self) -> bool: return self.read_bytes(1) != b'\x00'
     def read_int16(self): return self._read_num('<h')
     def read_uint16(self): return self._read_num('<H')
     def read_int32(self): return self._read_num('<i')
@@ -293,7 +313,7 @@ class BCDataStream(object):
     def read_int64(self): return self._read_num('<q')
     def read_uint64(self): return self._read_num('<Q')
 
-    def write_boolean(self, val): return self.write(chr(1) if val else chr(0))
+    def write_boolean(self, val): return self.write(b'\x01' if val else b'\x00')
     def write_int16(self, val): return self._write_num('<h', val)
     def write_uint16(self, val): return self._write_num('<H', val)
     def write_int32(self, val): return self._write_num('<i', val)
@@ -391,20 +411,32 @@ class OPPushDataGeneric:
 
 
 OPPushDataPubkey = OPPushDataGeneric(lambda x: x in (33, 65))
-# note that this does not include x_pubkeys !
+
+SCRIPTPUBKEY_TEMPLATE_P2PKH = [opcodes.OP_DUP, opcodes.OP_HASH160,
+                               OPPushDataGeneric(lambda x: x == 20),
+                               opcodes.OP_EQUALVERIFY, opcodes.OP_CHECKSIG]
+SCRIPTPUBKEY_TEMPLATE_P2SH = [opcodes.OP_HASH160, OPPushDataGeneric(lambda x: x == 20), opcodes.OP_EQUAL]
+SCRIPTPUBKEY_TEMPLATE_WITNESS_V0 = [opcodes.OP_0, OPPushDataGeneric(lambda x: x in (20, 32))]
 
 
-def match_decoded(decoded, to_match):
-    if decoded is None:
+def match_script_against_template(script, template) -> bool:
+    """Returns whether 'script' matches 'template'."""
+    if script is None:
         return False
-    if len(decoded) != len(to_match):
+    # optionally decode script now:
+    if isinstance(script, (bytes, bytearray)):
+        try:
+            script = [x for x in script_GetOp(script)]
+        except MalformedBitcoinScript:
+            return False
+    if len(script) != len(template):
         return False
-    for i in range(len(decoded)):
-        to_match_item = to_match[i]
-        decoded_item = decoded[i]
-        if OPPushDataGeneric.is_instance(to_match_item) and to_match_item.check_data_len(decoded_item[0]):
+    for i in range(len(script)):
+        template_item = template[i]
+        script_item = script[i]
+        if OPPushDataGeneric.is_instance(template_item) and template_item.check_data_len(script_item[0]):
             continue
-        if to_match_item != decoded_item[0]:
+        if template_item != script_item[0]:
             return False
     return True
 
@@ -413,28 +445,25 @@ def get_address_from_output_script(_bytes: bytes, *, net=None) -> Optional[str]:
     try:
         decoded = [x for x in script_GetOp(_bytes)]
     except MalformedBitcoinScript:
-        decoded = None
+        return None
 
     # p2pkh
-    match = [opcodes.OP_DUP, opcodes.OP_HASH160, OPPushDataGeneric(lambda x: x == 20), opcodes.OP_EQUALVERIFY, opcodes.OP_CHECKSIG]
-    if match_decoded(decoded, match):
+    if match_script_against_template(decoded, SCRIPTPUBKEY_TEMPLATE_P2PKH):
         return hash160_to_p2pkh(decoded[2][1], net=net)
 
     # p2sh
-    match = [opcodes.OP_HASH160, OPPushDataGeneric(lambda x: x == 20), opcodes.OP_EQUAL]
-    if match_decoded(decoded, match):
+    if match_script_against_template(decoded, SCRIPTPUBKEY_TEMPLATE_P2SH):
         return hash160_to_p2sh(decoded[1][1], net=net)
 
     # segwit address (version 0)
-    match = [opcodes.OP_0, OPPushDataGeneric(lambda x: x in (20, 32))]
-    if match_decoded(decoded, match):
+    if match_script_against_template(decoded, SCRIPTPUBKEY_TEMPLATE_WITNESS_V0):
         return hash_to_segwit_addr(decoded[1][1], witver=0, net=net)
 
     # segwit address (version 1-16)
     future_witness_versions = list(range(opcodes.OP_1, opcodes.OP_16 + 1))
     for witver, opcode in enumerate(future_witness_versions, start=1):
         match = [opcode, OPPushDataGeneric(lambda x: 2 <= x <= 40)]
-        if match_decoded(decoded, match):
+        if match_script_against_template(decoded, match):
             return hash_to_segwit_addr(decoded[1][1], witver=witver, net=net)
 
     return None
@@ -508,12 +537,39 @@ class Transaction:
             raise Exception(f"cannot initialize transaction from {raw}")
         self._inputs = None  # type: List[TxInput]
         self._outputs = None  # type: List[TxOutput]
-        self.locktime = 0
-        self.version = 1
-        self.timestamp = int(time.time())
-        self.serviceHash = ""
+        self._locktime = 0
+        self._version = 1
+        self._timestamp = int(time.time())
+        self._serviceHash = ""
 
         self._cached_txid = None  # type: Optional[str]
+
+    @property
+    def locktime(self):
+        return self._locktime
+
+    @locktime.setter
+    def locktime(self, value):
+        self._locktime = value
+        self.invalidate_ser_cache()
+
+    @property
+    def version(self):
+        return self._version
+
+    @version.setter
+    def version(self, value):
+        self._version = value
+        self.invalidate_ser_cache()
+
+    @property
+    def timestamp(self):
+        return self._timestamp
+
+    @version.setter
+    def timestamp(self, value):
+        self._timestamp = value
+        self.invalidate_ser_cache()
 
     def to_json(self) -> dict:
         d = {
@@ -544,8 +600,8 @@ class Transaction:
         raw_bytes = bfh(self._cached_network_ser)
         vds = BCDataStream()
         vds.write(raw_bytes)
-        self.version = vds.read_int32()
-        self.timestamp = vds.read_uint32()
+        self._version = vds.read_int32()
+        self._timestamp = vds.read_uint32()
         n_vin = vds.read_compact_size()
         is_segwit = (n_vin == 0)
         if is_segwit:
@@ -553,17 +609,21 @@ class Transaction:
             if marker != b'\x01':
                 raise ValueError('invalid txn marker byte: {}'.format(marker))
             n_vin = vds.read_compact_size()
+        if n_vin < 1:
+            raise SerializationError('tx needs to have at least 1 input')
         self._inputs = [parse_input(vds) for i in range(n_vin)]
         n_vout = vds.read_compact_size()
+        if n_vout < 1:
+            raise SerializationError('tx needs to have at least 1 output')
         self._outputs = [parse_output(vds) for i in range(n_vout)]
         if is_segwit:
             for txin in self._inputs:
                 parse_witness(vds, txin)
-        self.locktime = vds.read_uint32()
+        self._locktime = vds.read_uint32()
 
         # read ECC service reference hash of version 2 txs
         if self.version > 1:
-            self.serviceHash = bh2u(vds.read_bytes(32)) # unused, just read it, necessary for serialization and txid calculation
+            self._serviceHash = bh2u(vds.read_bytes(32)) # unused, just read it, necessary for serialization and txid calculation
 
         if vds.can_read_more():
             raise SerializationError('extra junk at the end')
@@ -914,6 +974,20 @@ class Transaction:
         else:
             raise Exception('output not found', addr)
 
+    def get_input_idx_that_spent_prevout(self, prevout: TxOutpoint) -> Optional[int]:
+        # build cache if there isn't one yet
+        # note: can become stale and return incorrect data
+        #       if the tx is modified later; that's out of scope.
+        if not hasattr(self, '_prevout_to_input_idx'):
+            d = {}  # type: Dict[TxOutpoint, int]
+            for i, txin in enumerate(self.inputs()):
+                d[txin.prevout] = i
+            self._prevout_to_input_idx = d
+        idx = self._prevout_to_input_idx.get(prevout)
+        if idx is not None:
+            assert self.inputs()[idx].prevout == prevout
+        return idx
+
 
 def convert_raw_tx_to_hex(raw: Union[str, bytes]) -> str:
     """Sanitizes tx-describing input (hex/base43/base64) into
@@ -1073,8 +1147,8 @@ class PSBTSection:
 class PartialTxInput(TxInput, PSBTSection):
     def __init__(self, *args, **kwargs):
         TxInput.__init__(self, *args, **kwargs)
-        self.utxo = None  # type: Optional[Transaction]
-        self.witness_utxo = None  # type: Optional[TxOutput]
+        self._utxo = None  # type: Optional[Transaction]
+        self._witness_utxo = None  # type: Optional[TxOutput]
         self.part_sigs = {}  # type: Dict[bytes, bytes]  # pubkey -> sig
         self.sighash = None  # type: Optional[int]
         self.bip32_paths = {}  # type: Dict[bytes, Tuple[bytes, Sequence[int]]]  # pubkey -> (xpub_fingerprint, path)
@@ -1088,8 +1162,29 @@ class PartialTxInput(TxInput, PSBTSection):
         self._trusted_value_sats = None  # type: Optional[int]
         self._trusted_address = None  # type: Optional[str]
         self.block_height = None  # type: Optional[int]  # height at which the TXO is mined; None means unknown
+        self.spent_height = None  # type: Optional[int]  # height at which the TXO got spent
         self._is_p2sh_segwit = None  # type: Optional[bool]  # None means unknown
         self._is_native_segwit = None  # type: Optional[bool]  # None means unknown
+
+    @property
+    def utxo(self):
+        return self._utxo
+
+    @utxo.setter
+    def utxo(self, value: Optional[Transaction]):
+        self._utxo = value
+        self.validate_data()
+        self.ensure_there_is_only_one_utxo()
+
+    @property
+    def witness_utxo(self):
+        return self._witness_utxo
+
+    @witness_utxo.setter
+    def witness_utxo(self, value: Optional[TxOutput]):
+        self._witness_utxo = value
+        self.validate_data()
+        self.ensure_there_is_only_one_utxo()
 
     def to_json(self):
         d = super().to_json()
@@ -1123,6 +1218,10 @@ class PartialTxInput(TxInput, PSBTSection):
             if self.prevout.txid.hex() != self.utxo.txid():
                 raise PSBTInputConsistencyFailure(f"PSBT input validation: "
                                                   f"If a non-witness UTXO is provided, its hash must match the hash specified in the prevout")
+            if self.witness_utxo:
+                if self.utxo.outputs()[self.prevout.out_idx] != self.witness_utxo:
+                    raise PSBTInputConsistencyFailure(f"PSBT input validation: "
+                                                      f"If both non-witness UTXO and witness UTXO are provided, they must be consistent")
         # The following test is disabled, so we are willing to sign non-segwit inputs
         # without verifying the input amount. This means, given a maliciously modified PSBT,
         # for non-segwit inputs, we might end up burning coins as miner fees.
@@ -1154,16 +1253,12 @@ class PartialTxInput(TxInput, PSBTSection):
         if kt == PSBTInputType.NON_WITNESS_UTXO:
             if self.utxo is not None:
                 raise SerializationError(f"duplicate key: {repr(kt)}")
-            if self.witness_utxo is not None:
-                raise SerializationError(f"PSBT input cannot have both PSBT_IN_NON_WITNESS_UTXO and PSBT_IN_WITNESS_UTXO")
             self.utxo = Transaction(val)
             self.utxo.deserialize()
             if key: raise SerializationError(f"key for {repr(kt)} must be empty")
         elif kt == PSBTInputType.WITNESS_UTXO:
             if self.witness_utxo is not None:
                 raise SerializationError(f"duplicate key: {repr(kt)}")
-            if self.utxo is not None:
-                raise SerializationError(f"PSBT input cannot have both PSBT_IN_NON_WITNESS_UTXO and PSBT_IN_WITNESS_UTXO")
             self.witness_utxo = TxOutput.from_network_bytes(val)
             if key: raise SerializationError(f"key for {repr(kt)} must be empty")
         elif kt == PSBTInputType.PARTIAL_SIG:
@@ -1212,9 +1307,10 @@ class PartialTxInput(TxInput, PSBTSection):
             self._unknown[full_key] = val
 
     def serialize_psbt_section_kvs(self, wr):
+        self.ensure_there_is_only_one_utxo()
         if self.witness_utxo:
             wr(PSBTInputType.WITNESS_UTXO, self.witness_utxo.serialize_to_network())
-        elif self.utxo:
+        if self.utxo:
             wr(PSBTInputType.NON_WITNESS_UTXO, bfh(self.utxo.serialize_to_network(include_sigs=True)))
         for pk, val in sorted(self.part_sigs.items()):
             wr(PSBTInputType.PARTIAL_SIG, val, pk)
@@ -1328,11 +1424,10 @@ class PartialTxInput(TxInput, PSBTSection):
         self.finalize()
 
     def ensure_there_is_only_one_utxo(self):
+        # we prefer having the full previous tx, even for segwit inputs. see #6198
+        # for witness v1, witness_utxo will be enough though
         if self.utxo is not None and self.witness_utxo is not None:
-            if Transaction.is_segwit_input(self):
-                self.utxo = None
-            else:
-                self.witness_utxo = None
+            self.witness_utxo = None
 
     def convert_utxo_to_witness_utxo(self) -> None:
         if self.utxo:
@@ -1360,14 +1455,13 @@ class PartialTxInput(TxInput, PSBTSection):
                 except MalformedBitcoinScript:
                     decoded = None
                 # witness version 0
-                match = [opcodes.OP_0, OPPushDataGeneric(lambda x: x in (20, 32))]
-                if match_decoded(decoded, match):
+                if match_script_against_template(decoded, SCRIPTPUBKEY_TEMPLATE_WITNESS_V0):
                     return True
                 # witness version 1-16
                 future_witness_versions = list(range(opcodes.OP_1, opcodes.OP_16 + 1))
                 for witver, opcode in enumerate(future_witness_versions, start=1):
                     match = [opcode, OPPushDataGeneric(lambda x: 2 <= x <= 40)]
-                    if match_decoded(decoded, match):
+                    if match_script_against_template(decoded, match):
                         return True
                 return False
 
@@ -1904,25 +1998,6 @@ class PartialTransaction(Transaction):
         """
         for txin in self.inputs():
             txin.convert_utxo_to_witness_utxo()
-
-    def is_there_risk_of_burning_coins_as_fees(self) -> bool:
-        """Returns whether there is risk of burning coins as fees if we sign.
-
-        Note:
-            - legacy sighash does not commit to any input amounts
-            - BIP-0143 sighash only commits to the *corresponding* input amount
-            - BIP-taproot sighash commits to *all* input amounts
-        """
-        for txin in self.inputs():
-            # if we have full previous tx, we *know* the input amount
-            if txin.utxo:
-                continue
-            # if we have just the previous output, we only have guarantees if
-            # the sighash commits to this data
-            if txin.witness_utxo and Transaction.is_segwit_input(txin):
-                continue
-            return True
-        return False
 
     def remove_signatures(self):
         for txin in self.inputs():
