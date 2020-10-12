@@ -202,7 +202,7 @@ class ElectrumWindow(App):
 
     def on_new_intent(self, intent):
         data = str(intent.getDataString())
-        if str(intent.getScheme()).lower() in ('bitcoin', 'lightning'):
+        if str(intent.getScheme()).lower() in ('eccoin', 'lightning'):
             self._process_invoice_str(data)
 
     _invoice_intent_queued = None  # type: Optional[str]
@@ -214,7 +214,7 @@ class ElectrumWindow(App):
             self.switch_to('send')
             self._invoice_intent_queued = invoice
             return
-        if invoice.lower().startswith('bitcoin:'):
+        if invoice.lower().startswith('eccoin:'):
             self.set_URI(invoice)
         elif invoice.lower().startswith('lightning:'):
             self.set_ln_invoice(invoice)
